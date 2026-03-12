@@ -6,6 +6,7 @@ Run with:  streamlit run dashboard.py
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from pathlib import Path
 import streamlit as st
@@ -56,17 +57,17 @@ def _universe():
     return pf.get_trading_universe()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def _prices(symbols):
     return pf.get_latest_prices(list(symbols), lookback_days=1)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def _signals(symbols):
     return pf.get_latest_signals(list(symbols))
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=600)
 def _ohlc_history(symbol, start_date=None, end_date=None):
     """Fetch daily OHLC data for a symbol within an optional date range."""
     with pf.db_connection() as conn:
@@ -86,7 +87,7 @@ def _ohlc_history(symbol, start_date=None, end_date=None):
     return df
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=600)
 def _signal_history(symbol, start_date=None, end_date=None):
     """Fetch full signal history for a symbol."""
     with pf.db_connection() as conn:
@@ -107,7 +108,7 @@ def _signal_history(symbol, start_date=None, end_date=None):
     return df
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=600)
 def _latest_full_signals(symbol):
     """Get the most recent row of all individual signals for a symbol."""
     with pf.db_connection() as conn:
@@ -156,8 +157,6 @@ def _do_mtm():
         pm.mark_to_market(live)
         _prices.clear()
         _ohlc_history.clear()
-        _signal_history.clear()
-        _latest_full_signals.clear()
 
 
 # ========================================================================
@@ -209,10 +208,7 @@ def _update_data():
                             intervals=[fetch_interval])
         _universe.clear()
         _prices.clear()
-        _signals.clear()
         _ohlc_history.clear()
-        _signal_history.clear()
-        _latest_full_signals.clear()
         return True, f"Updated {len(selected_symbols)} symbols ({fetch_interval})"
     except Exception as e:
         return False, str(e)
@@ -243,8 +239,6 @@ with c2:
                     for m in msgs:
                         st.text(m)
                 _signals.clear()
-                _prices.clear()
-                _ohlc_history.clear()
                 _signal_history.clear()
                 _latest_full_signals.clear()
                 st.rerun()
@@ -260,10 +254,7 @@ if st.sidebar.button("Update Data + Signals", key="btn_both"):
                 )
                 st.success(f"Data + {sok} signals updated")
                 _do_mtm()
-                _universe.clear()
-                _prices.clear()
                 _signals.clear()
-                _ohlc_history.clear()
                 _signal_history.clear()
                 _latest_full_signals.clear()
                 st.rerun()
@@ -374,7 +365,6 @@ with tab0:
             col_charts, col_panel = st.columns([5, 2])
 
             with col_charts:
-                from plotly.subplots import make_subplots
                 fig = make_subplots(
                     rows=_n_rows, cols=1, shared_xaxes=True,
                     vertical_spacing=0.04,
@@ -493,14 +483,15 @@ with tab0:
 
                 fig_gauge = go.Figure()
 
-                # 1. Outer gradient ring — 40 segments
-                for _i in range(40):
-                    _lo = -20 + _i
-                    _d_lo, _d_hi = _s2d(_lo), _s2d(_lo + 1)
-                    _r, _th = _arc(_RO_IN, _RO_OUT, _d_hi, _d_lo, n=6)
+                # 1. Outer gradient ring — 5 color-zone arcs
+                _zone_ranges = [(-20, -10), (-10, -5), (-5, 5), (5, 10), (10, 20)]
+                _zone_colors = ['#8b1a1a', '#d32f2f', '#00acc1', '#43a047', '#1b5e20']
+                for (_zlo, _zhi), _zc in zip(_zone_ranges, _zone_colors):
+                    _d_lo, _d_hi = _s2d(_zhi), _s2d(_zlo)
+                    _r, _th = _arc(_RO_IN, _RO_OUT, _d_lo, _d_hi, n=20)
                     fig_gauge.add_trace(go.Scatterpolar(
                         r=_r, theta=_th, fill='toself',
-                        fillcolor=_zone_color(_lo + 0.5),
+                        fillcolor=_zc,
                         line=dict(width=0, color='rgba(0,0,0,0)'),
                         showlegend=False, hoverinfo='skip',
                     ))
