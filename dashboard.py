@@ -154,7 +154,10 @@ def _do_mtm():
     live = pf.fetch_live_prices(selected_symbols)  # hits Bybit API + saves to DB
     if live:
         pm.mark_to_market(live)
-        _prices.clear()  # invalidate cached DB prices so UI shows fresh data
+        _prices.clear()
+        _ohlc_history.clear()
+        _signal_history.clear()
+        _latest_full_signals.clear()
 
 
 # ========================================================================
@@ -207,6 +210,9 @@ def _update_data():
         _universe.clear()
         _prices.clear()
         _signals.clear()
+        _ohlc_history.clear()
+        _signal_history.clear()
+        _latest_full_signals.clear()
         return True, f"Updated {len(selected_symbols)} symbols ({fetch_interval})"
     except Exception as e:
         return False, str(e)
@@ -238,6 +244,9 @@ with c2:
                         st.text(m)
                 _signals.clear()
                 _prices.clear()
+                _ohlc_history.clear()
+                _signal_history.clear()
+                _latest_full_signals.clear()
                 st.rerun()
 
 if st.sidebar.button("Update Data + Signals", key="btn_both"):
