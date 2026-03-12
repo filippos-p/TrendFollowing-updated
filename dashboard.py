@@ -472,76 +472,98 @@ with tab0:
                     '<p style="font-size:13px;color:#999;margin:0 0 2px 0;font-weight:600;">Forecast</p>',
                     unsafe_allow_html=True)
 
-                # Outer ring: thin gradient zones with tick labels
-                _gauge_steps = []
-                for _i in range(40):
-                    _lo = -20 + _i
-                    _gauge_steps.append(dict(range=[_lo, _lo + 1], color=_zone_color(_lo + 0.5)))
-
                 _val_color = _zone_color(combined_val)
                 _rounded_val = round(combined_val, 1)
 
+                # --- Custom polar gauge: outer thin gradient + inner thick fill ---
+                # Signal → angle: -20 → 180°, 0 → 90°, +20 → 0°
+                def _s2d(v):
+                    return 180.0 - (v + 20.0) / 40.0 * 180.0
+
+                # Arc polygon: traces outer edge then inner edge
+                def _arc(r_in, r_out, d_start, d_end, n=40):
+                    a1 = np.linspace(np.radians(d_start), np.radians(d_end), n)
+                    a2 = np.linspace(np.radians(d_end), np.radians(d_start), n)
+                    return (np.concatenate([np.full(n, r_out), np.full(n, r_in)]).tolist(),
+                            np.degrees(np.concatenate([a1, a2])).tolist())
+
+                # Radii — outer band width=0.08, inner band width=0.40 → 5:1
+                _RO_OUT, _RO_IN = 1.0, 0.92   # outer ring
+                _RI_OUT, _RI_IN = 0.89, 0.49   # inner ring (tiny gap between)
+
                 fig_gauge = go.Figure()
 
-                # Trace 1: Outer thin ring — gradient + ticks
-                fig_gauge.add_trace(go.Indicator(
-                    mode="gauge",
-                    value=_rounded_val,
-                    gauge=dict(
-                        shape='angular',
-                        axis=dict(
-                            range=[-20, 20],
-                            tickwidth=1, tickcolor='#555',
-                            tickvals=[-20, -15, -10, -5, 0, 5, 10, 15, 20],
-                            tickfont=dict(size=10, color='#999'),
-                            ticklen=8,
-                        ),
-                        bar=dict(color='rgba(0,0,0,0)', thickness=0),
-                        bgcolor='rgba(0,0,0,0)',
-                        borderwidth=0,
-                        steps=_gauge_steps,
-                    ),
-                    domain=dict(x=[0.0, 1.0], y=[0.0, 1.0]),
+                # 1. Outer gradient ring — 40 segments
+                for _i in range(40):
+                    _lo = -20 + _i
+                    _d_lo, _d_hi = _s2d(_lo), _s2d(_lo + 1)
+                    _r, _th = _arc(_RO_IN, _RO_OUT, _d_hi, _d_lo, n=6)
+                    fig_gauge.add_trace(go.Scatterpolar(
+                        r=_r, theta=_th, fill='toself',
+                        fillcolor=_zone_color(_lo + 0.5),
+                        line=dict(width=0, color='rgba(0,0,0,0)'),
+                        showlegend=False, hoverinfo='skip',
+                    ))
+
+                # 2. Inner ring background (dark)
+                _r, _th = _arc(_RI_IN, _RI_OUT, 0, 180, n=60)
+                fig_gauge.add_trace(go.Scatterpolar(
+                    r=_r, theta=_th, fill='toself',
+                    fillcolor='#252530',
+                    line=dict(width=0, color='rgba(0,0,0,0)'),
+                    showlegend=False, hoverinfo='skip',
                 ))
 
-                # Trace 2: Inner wide ring — solid fill from opposite extreme to value
-                # Positive: bar fills -20 → value (natural). Negative: steps fill value → +20.
-                # Slightly over-extended range [-21, 21] so fill reaches the visual ±20 edges
+                # 3. Inner ring fill — from opposite extreme to value
                 if _rounded_val >= 0:
-                    _inner_bar = dict(color=_val_color, thickness=1.0)
-                    _inner_steps = []
+                    _df_s, _df_e = _s2d(_rounded_val), 180.0   # -20 end to value
                 else:
-                    _inner_bar = dict(color='rgba(0,0,0,0)', thickness=0)
-                    _inner_steps = [dict(range=[_rounded_val, 21], color=_val_color)]
+                    _df_s, _df_e = 0.0, _s2d(_rounded_val)     # +20 end to value
+                if _df_e > _df_s + 0.5:
+                    _r, _th = _arc(_RI_IN, _RI_OUT, _df_s, _df_e, n=60)
+                    fig_gauge.add_trace(go.Scatterpolar(
+                        r=_r, theta=_th, fill='toself',
+                        fillcolor=_val_color,
+                        line=dict(width=0, color='rgba(0,0,0,0)'),
+                        showlegend=False, hoverinfo='skip',
+                    ))
 
-                fig_gauge.add_trace(go.Indicator(
-                    mode="gauge+number",
-                    value=_rounded_val,
-                    number=dict(
-                        font=dict(size=28, color=_val_color, family='Arial'),
-                        valueformat='+.1f',
-                    ),
-                    gauge=dict(
-                        shape='angular',
-                        axis=dict(range=[-21, 21], visible=False),
-                        bar=_inner_bar,
-                        bgcolor='#252530',
-                        borderwidth=0,
-                        steps=_inner_steps,
-                        threshold=dict(
-                            line=dict(color='white', width=2),
-                            thickness=0.85, value=_rounded_val,
-                        ),
-                    ),
-                    # Inset domain: 5:1 inner:outer width ratio
-                    # outer_edge ≈ 1/12 on each side → d ≈ 0.05
-                    domain=dict(x=[0.05, 0.95], y=[0.05, 0.95]),
+                # 4. White threshold line at current value
+                _th_deg = _s2d(_rounded_val)
+                fig_gauge.add_trace(go.Scatterpolar(
+                    r=[_RI_IN, _RO_OUT], theta=[_th_deg, _th_deg],
+                    mode='lines', line=dict(color='white', width=2),
+                    showlegend=False, hoverinfo='skip',
                 ))
+
+                # 5. Tick labels outside outer ring
+                for _v in [-20, -15, -10, -5, 0, 5, 10, 15, 20]:
+                    fig_gauge.add_trace(go.Scatterpolar(
+                        r=[_RO_OUT + 0.10], theta=[_s2d(_v)],
+                        mode='text', text=[str(int(_v))],
+                        textfont=dict(size=9, color='#999'),
+                        showlegend=False, hoverinfo='skip',
+                    ))
+
+                # 6. Value in center
+                fig_gauge.add_annotation(
+                    text=f"<b>{_rounded_val:+.1f}</b>",
+                    x=0.5, y=0.18, xref='paper', yref='paper',
+                    font=dict(size=28, color=_val_color, family='Arial'),
+                    showarrow=False,
+                )
 
                 fig_gauge.update_layout(
+                    polar=dict(
+                        sector=[0, 180],
+                        radialaxis=dict(visible=False, range=[0, 1.25]),
+                        angularaxis=dict(visible=False, direction='counterclockwise', rotation=0),
+                        bgcolor='rgba(0,0,0,0)',
+                    ),
                     height=210,
-                    margin=dict(l=34, r=34, t=34, b=4),
-                    paper_bgcolor=_dark_bg, font_color='#c0c0c0',
+                    margin=dict(l=8, r=8, t=8, b=30),
+                    paper_bgcolor=_dark_bg,
+                    showlegend=False,
                 )
                 st.plotly_chart(fig_gauge, use_container_width=True, key="gauge_chart")
 
