@@ -1,0 +1,676 @@
+"""
+Streamlit live trading dashboard.
+Run with:  streamlit run dashboard.py
+"""
+
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from datetime import datetime
+from pathlib import Path
+import streamlit as st
+import logging
+import warnings
+
+warnings.filterwarnings('ignore')
+logging.getLogger('streamlit.runtime.scriptrunner_utils.script_run_context').setLevel(logging.ERROR)
+
+import config as cfg
+import strategy
+import portfolio as pf
+
+# ========================================================================
+# Page config
+# ========================================================================
+try:
+    st.set_page_config(page_title="Live Trading Dashboard", page_icon="chart_with_upwards_trend",
+                       layout="wide", initial_sidebar_state="expanded")
+except Exception:
+    pass
+
+st.title("Live Trading Dashboard")
+st.caption("Position management with buffer zones, signal-weighted allocation, and mark-to-market PnL")
+
+if not Path(str(cfg.DB_PATH)).exists():
+    st.error("Database not found. Run data_fetcher.py first.")
+    st.stop()
+
+# ========================================================================
+# Session state & manager
+# ========================================================================
+
+if 'pm' not in st.session_state:
+    st.session_state.pm = pf.PortfolioManager()
+if 'prev_symbols' not in st.session_state:
+    st.session_state.prev_symbols = []
+
+pm: pf.PortfolioManager = st.session_state.pm
+
+
+# ========================================================================
+# Cached data loaders
+# ========================================================================
+
+@st.cache_data(ttl=300)
+def _universe():
+    return pf.get_trading_universe()
+
+
+@st.cache_data(ttl=60)
+def _prices(symbols):
+    return pf.get_latest_prices(list(symbols), lookback_days=1)
+
+
+@st.cache_data(ttl=60)
+def _signals(symbols):
+    return pf.get_latest_signals(list(symbols))
+
+
+def _load_positions(selected):
+    """Load prices, signals, current positions and compute target allocations."""
+    prices = _prices(tuple(selected))
+    signals = _signals(tuple(selected))
+    cur_pos = pm.get_current_positions()
+    if prices.empty or signals.empty:
+        return None
+
+    sig_list = []
+    for sym in selected:
+        sp = prices[prices['symbol'] == sym]
+        ss = signals[signals['symbol'] == sym]
+        if not sp.empty and not ss.empty:
+            sig_list.append({
+                'symbol': sym,
+                'price': sp.iloc[0]['close'],
+                'signal': ss.iloc[0]['combined_signal'],
+                'volatility': ss.iloc[0]['volatility'],
+            })
+    if not sig_list:
+        return None
+
+    positions, theo, trading, unrealized = pm.calculate_positions(sig_list, cur_pos)
+    return positions, theo, trading, unrealized, sig_list, cur_pos
+
+
+def _do_mtm():
+    """Mark-to-market: fetch LIVE prices from Bybit, save to DB, update positions."""
+    if not selected_symbols:
+        return
+    live = pf.fetch_live_prices(selected_symbols)  # hits Bybit API + saves to DB
+    if live:
+        pm.mark_to_market(live)
+        _prices.clear()  # invalidate cached DB prices so UI shows fresh data
+
+
+# ========================================================================
+# Sidebar
+# ========================================================================
+
+st.sidebar.title("Trading Controls")
+
+if st.sidebar.button("Optimize Database (run once)"):
+    with st.spinner("Optimizing..."):
+        pf.optimize_indexes()
+        st.success("Database optimized.")
+
+st.sidebar.subheader("Data Management")
+trading_symbols = _universe()
+
+if trading_symbols:
+    mode = st.sidebar.radio("Symbol selection", ["Custom", "All"])
+    if mode == "Custom":
+        selected_symbols = st.sidebar.multiselect(
+            "Symbols", trading_symbols,
+            default=trading_symbols[:min(10, len(trading_symbols))],
+        )
+    else:
+        selected_symbols = trading_symbols
+    if not selected_symbols:
+        st.sidebar.warning("No symbols selected")
+        selected_symbols = []
+else:
+    selected_symbols = []
+    st.sidebar.warning("No symbols in universe")
+
+
+BYBIT_INTERVALS = ['1d', '4h', '1h', '15m', '5m']
+fetch_interval = st.sidebar.selectbox(
+    "Fetch timeframe", BYBIT_INTERVALS, index=0, key="fetch_tf",
+    help="Default: 1d. Other timeframes stored separately in DB for future strategies.",
+)
+
+
+def _update_data():
+    try:
+        from data_fetcher import DataConfig, CryptoDataCollector
+        c = CryptoDataCollector(DataConfig(
+            db_path=str(cfg.DB_PATH), max_workers=7,
+            request_interval=0.2, backup_enabled=False,
+        ))
+        c.update_price_data(selected_symbols, category='linear',
+                            intervals=[fetch_interval])
+        _universe.clear()
+        _prices.clear()
+        _signals.clear()
+        return True, f"Updated {len(selected_symbols)} symbols ({fetch_interval})"
+    except Exception as e:
+        return False, str(e)
+
+
+c1, c2 = st.sidebar.columns(2)
+with c1:
+    if st.button("Update Data", key="btn_data"):
+        if selected_symbols:
+            with st.spinner("Fetching..."):
+                ok, msg = _update_data()
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    _do_mtm()
+                    st.rerun()
+with c2:
+    if st.button("Calc Signals", key="btn_sig"):
+        if selected_symbols:
+            with st.spinner("Computing..."):
+                bar = st.progress(0)
+                ok, err, msgs = pf.compute_and_save_signals(
+                    selected_symbols, strategy, progress_cb=bar.progress,
+                )
+                st.success(f"Computed {ok} symbols")
+                if err:
+                    st.warning(f"{err} errors")
+                with st.expander("Details"):
+                    for m in msgs:
+                        st.text(m)
+                _signals.clear()
+                _prices.clear()
+                st.rerun()
+
+if st.sidebar.button("Update Data + Signals", key="btn_both"):
+    if selected_symbols:
+        with st.spinner("Updating data & signals..."):
+            ok, msg = _update_data()
+            if ok:
+                bar = st.progress(0)
+                sok, serr, smsgs = pf.compute_and_save_signals(
+                    selected_symbols, strategy, progress_cb=bar.progress,
+                )
+                st.success(f"Data + {sok} signals updated")
+                _do_mtm()
+                st.rerun()
+            else:
+                st.error(msg)
+
+
+# Universe change check
+uc = pm.handle_universe_change(trading_symbols, st.session_state.prev_symbols)
+if uc.get('message') and uc['message'] != 'No changes':
+    st.sidebar.info(uc['message'])
+st.session_state.prev_symbols = trading_symbols.copy()
+
+# Portfolio settings
+st.sidebar.subheader("Portfolio Settings")
+cap_input = st.sidebar.number_input("Initial Capital ($)", 10, 10_000_000, cfg.DASHBOARD_INITIAL_CAPITAL, 100)
+tv = st.sidebar.slider("Target Volatility", 0.10, 1.00, cfg.DASHBOARD_TARGET_VOLATILITY, 0.05)
+buf = st.sidebar.slider("Default Buffer Zone", 0.05, 0.50, cfg.DASHBOARD_DEFAULT_BUFFER, 0.01)
+pm.initial_capital = cap_input
+pm.target_volatility = tv
+pm.default_buffer_pct = buf
+
+# ========================================================================
+# Tabs
+# ========================================================================
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Position Management", "Portfolio Overview", "Trade Log", "System Status"
+])
+
+# ------ TAB 1: Positions ------
+with tab1:
+    st.subheader("Position Management")
+    if selected_symbols:
+        with st.spinner("Loading..."):
+            result = _load_positions(selected_symbols)
+        if result is None:
+            st.error("No data for selected symbols")
+        else:
+            positions, theo_cap, trading_cap, unrealized, sig_list, cur_pos = result
+            if positions:
+                pos_df = pd.DataFrame(positions)
+
+                # Summary
+                st.subheader("Portfolio Summary")
+                exposure = cur_pos['position_usd'].abs().sum() if not cur_pos.empty else 0
+                cash = trading_cap - exposure
+                util = exposure / trading_cap * 100 if trading_cap else 0
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Trading Capital", f"${trading_cap:,.0f}")
+                c2.metric("Exposure", f"${exposure:,.0f}")
+                c3.metric("Cash", f"${cash:,.0f}")
+                c4.metric("Unrealized PnL", f"${unrealized:,.0f}")
+                c5.metric("Utilization", f"{util:.1f}%")
+
+                # Position table
+                st.subheader("Positions")
+                disp = pos_df.copy()
+                disp['Signal'] = disp['signal'].round(4)
+                disp['Vol%'] = (disp['volatility'] * 100).round(3)
+                disp['Price'] = disp['price'].round(4)
+                disp['Current$'] = disp['current_position_usd'].round(2)
+                disp['Target$'] = disp['achievable_position_usd'].round(2)
+                disp['TargetCoins'] = disp['achievable_position_coins'].round(4)
+                disp['Buffer'] = disp.apply(
+                    lambda r: f"${r['buffer_lower']:.0f} - ${r['buffer_upper']:.0f}", axis=1)
+                disp['Action'] = disp['action']
+                disp['Trade$'] = disp['trade_amount_usd'].round(2)
+
+                def _color_action(v):
+                    if v == 'BUY': return 'background-color: lightgreen'
+                    if v == 'SELL': return 'background-color: lightcoral'
+                    return 'background-color: lightgray'
+
+                st.dataframe(
+                    disp[['symbol', 'Signal', 'Vol%', 'Price', 'Current$',
+                          'Target$', 'TargetCoins', 'Buffer', 'Action', 'Trade$'
+                          ]].style.applymap(_color_action, subset=['Action']),
+                    use_container_width=True, height=500,
+                )
+
+                # Trade execution
+                st.subheader("Execute Trades")
+                needs_action = pos_df[pos_df['action'] != 'HOLD']
+                if not needs_action.empty:
+                    # Execute All button
+                    ea_reason = st.selectbox("Reason for all", ["rebalance", "signal_change", "buffer_breach", "manual"],
+                                             key="ea_reason")
+                    if st.button("Execute All Trades", key="exec_all", type="primary"):
+                        ok_count, fail_count = 0, 0
+                        for _, p in needs_action.iterrows():
+                            ok = pm.execute_trade(
+                                p['symbol'], p['action'],
+                                abs(p['trade_amount_usd']), abs(p['trade_amount_coins']),
+                                p['price'], ea_reason)
+                            if ok:
+                                ok_count += 1
+                            else:
+                                fail_count += 1
+                        if ok_count:
+                            st.success(f"Executed {ok_count} trades")
+                        if fail_count:
+                            st.error(f"{fail_count} trades failed")
+                        if ok_count:
+                            _do_mtm()
+                            st.rerun()
+
+                    st.divider()
+                    # Individual trades
+                    for _, p in needs_action.iterrows():
+                        c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+                        c1.write(f"**{p['symbol']}** | Cur: ${p['current_position_usd']:.0f} -> Tgt: ${p['achievable_position_usd']:.0f}")
+                        c2.write(f"**{p['action']}** ${p['trade_amount_usd']:.0f} ({p['trade_amount_coins']:.4f} coins)")
+                        reason = c3.selectbox("Reason", ["buffer_breach", "signal_change", "rebalance", "manual"],
+                                              key=f"r_{p['symbol']}")
+                        if c4.button("Execute", key=f"x_{p['symbol']}"):
+                            ok = pm.execute_trade(p['symbol'], p['action'],
+                                                  abs(p['trade_amount_usd']), abs(p['trade_amount_coins']),
+                                                  p['price'], reason)
+                            if ok:
+                                st.success(f"{p['action']} executed for {p['symbol']}")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed for {p['symbol']}")
+                        st.divider()
+                else:
+                    st.info("All positions within buffer zones.")
+
+                # Manual entry
+                with st.expander("Manual Trade Entry"):
+                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    msym = mc1.selectbox("Symbol", selected_symbols, key="m_sym")
+                    mact = mc2.selectbox("Action", ["BUY", "SELL"], key="m_act")
+                    musd = mc3.number_input("Amount ($)", 0.0, step=0.001, format="%.5f", key="m_usd")
+                    mprc = mc4.number_input("Price", 0.00001, step=0.00001, format="%.6f", key="m_prc")
+                    if st.button("Log Manual Trade"):
+                        if musd > 0 and mprc > 0:
+                            ok = pm.execute_trade(msym, mact, musd, musd / mprc, mprc, "manual")
+                            if ok:
+                                st.success(f"Manual {mact} logged for {msym}")
+                                st.rerun()
+                        else:
+                            st.error("Enter valid amount and price")
+            else:
+                st.info("No valid positions generated")
+
+# ------ TAB 2: Portfolio Overview ------
+with tab2:
+    st.subheader("Portfolio Overview")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Mark-to-Market"):
+            _do_mtm()
+            st.success("M2M updated")
+            st.rerun()
+    with c2:
+        if st.button("Rebalancing Check"):
+            if selected_symbols:
+                result = _load_positions(selected_symbols)
+                if result:
+                    pos_list = result[0]
+                    actions = [p for p in pos_list if p['action'] != 'HOLD']
+                    if actions:
+                        st.warning(f"{len(actions)} positions need rebalancing")
+                        st.dataframe(pd.DataFrame(actions)[['symbol', 'current_position_usd',
+                                                             'achievable_position_usd', 'action', 'trade_amount_usd']])
+                    else:
+                        st.success("No rebalancing needed")
+    with c3:
+        cap_info = pm.get_portfolio_capital()
+        st.info(f"Capital: ${cap_info[0]:,.0f} | Cash: ${cap_info[1]:,.0f}")
+
+    # History chart
+    try:
+        with pf.db_connection() as conn:
+            hist = pd.read_sql_query(
+                "SELECT date, total_capital, available_cash, total_exposure, "
+                "unrealized_pnl, realized_pnl, cumulative_pnl, num_positions "
+                "FROM daily_portfolio_log ORDER BY date DESC LIMIT 30", conn,
+            )
+        if not hist.empty:
+            st.subheader("Portfolio History (30d)")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=hist['date'], y=hist['total_capital'],
+                                     mode='lines+markers', name='Trading Capital'))
+            if 'unrealized_pnl' in hist.columns:
+                fig.add_trace(go.Scatter(
+                    x=hist['date'], y=hist['total_capital'] + hist['unrealized_pnl'],
+                    mode='lines+markers', name='Total Value'))
+            fig.add_trace(go.Scatter(x=hist['date'], y=hist['cumulative_pnl'],
+                                     mode='lines+markers', name='Cumulative PnL'))
+            fig.update_layout(
+                height=400, xaxis_title="Date", yaxis_title="Value ($)",
+                xaxis=dict(tickformat="%Y-%m-%d", dtick="D1"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            hist_disp = hist.copy()
+            hist_disp['date'] = pd.to_datetime(hist_disp['date']).dt.strftime('%Y-%m-%d')
+            st.dataframe(hist_disp.round(2), use_container_width=True)
+        else:
+            st.info("No portfolio history yet. Execute trades or run M2M.")
+    except Exception as e:
+        st.error(f"Error loading history: {e}")
+
+    # Current positions detail
+    cur_pos = pm.get_current_positions()
+    if not cur_pos.empty:
+        st.subheader("Exposure Breakdown")
+        prices_df = _prices(tuple(selected_symbols)) if selected_symbols else pd.DataFrame()
+        price_map = {}
+        if not prices_df.empty:
+            for _, r in prices_df.iterrows():
+                price_map[r['symbol']] = r['close']
+
+        rows = []
+        total_unr = 0
+        total_long = 0
+        total_short = 0
+        for _, p in cur_pos.iterrows():
+            sym = p['symbol']
+            cprice = price_map.get(sym, p['entry_price'] or 0)
+            entry = p['entry_price'] if p['entry_price'] and p['entry_price'] > 0 else cprice
+            coins = p['position_coins']
+            market_val = coins * cprice  # signed: positive=long, negative=short
+            notional = abs(market_val)
+            if coins > 0:
+                total_long += notional
+                upnl = coins * (cprice - entry)
+                pct = (cprice / entry - 1) * 100 if entry else 0
+                side = "LONG"
+            elif coins < 0:
+                total_short += notional
+                upnl = abs(coins) * (entry - cprice)
+                pct = -(cprice / entry - 1) * 100 if entry else 0
+                side = "SHORT"
+            else:
+                continue
+            total_unr += upnl
+            rows.append({
+                'symbol': sym, 'side': side,
+                'coins': coins, 'entry': entry,
+                'current': cprice, 'notional': notional,
+                'market_val': market_val,
+                'unrealized': upnl, 'pnl%': pct,
+            })
+        if rows:
+            edf = pd.DataFrame(rows)
+            net_exposure = total_long - total_short
+            gross_exposure = total_long + total_short
+
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric("Net Exposure", f"${net_exposure:,.2f}",
+                       delta="Long" if net_exposure > 0 else ("Short" if net_exposure < 0 else "Flat"))
+            mc2.metric("Gross Exposure", f"${gross_exposure:,.2f}")
+            mc3.metric("Long", f"${total_long:,.2f}")
+            mc4.metric("Short", f"${total_short:,.2f}")
+            mc5.metric("Unrealized PnL", f"${total_unr:,.2f}")
+
+            def _cpnl(v):
+                if v > 0: return 'color: green'
+                if v < 0: return 'color: red'
+                return ''
+            def _cside(v):
+                if v == 'LONG': return 'color: green'
+                if v == 'SHORT': return 'color: red'
+                return ''
+            st.dataframe(
+                edf[['symbol', 'side', 'coins', 'entry', 'current', 'notional',
+                     'unrealized', 'pnl%']].round(4).style
+                    .applymap(_cpnl, subset=['unrealized', 'pnl%'])
+                    .applymap(_cside, subset=['side']),
+                use_container_width=True,
+            )
+
+# ------ TAB 3: Trade Log ------
+with tab3:
+    st.subheader("Trade Log")
+    try:
+        with pf.db_connection() as conn:
+            c1, c2, c3 = st.columns(3)
+            fsym = c1.selectbox("Symbol", ["All"] + (selected_symbols or []), key="tl_sym")
+            fact = c2.selectbox("Action", ["All", "BUY", "SELL"], key="tl_act")
+            flim = c3.selectbox("Show Last", [25, 50, 100, "All"], key="tl_lim")
+
+            q = ("SELECT timestamp,symbol,action,amount_usd,amount_coins,price,"
+                 "reason,position_before_usd,position_after_usd,realized_pnl "
+                 "FROM trade_execution_log WHERE 1=1")
+            params = []
+            if fsym != "All":
+                q += " AND symbol=?"
+                params.append(fsym)
+            if fact != "All":
+                q += " AND action=?"
+                params.append(fact)
+            q += " ORDER BY timestamp DESC"
+            if flim != "All":
+                q += f" LIMIT {flim}"
+
+            trades = pd.read_sql_query(q, conn, params=params)
+
+        if not trades.empty:
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Total Trades", len(trades))
+            sc2.metric("Buys", len(trades[trades['action'] == 'BUY']))
+            sc3.metric("Sells", len(trades[trades['action'] == 'SELL']))
+            sc4.metric("Realized PnL", f"${trades['realized_pnl'].sum():.2f}")
+            st.dataframe(trades.round(4), use_container_width=True, height=500)
+
+            if st.button("Export CSV"):
+                csv = trades.to_csv(index=False)
+                st.download_button("Download", csv,
+                                   f"trades_{datetime.now():%Y%m%d_%H%M%S}.csv", "text/csv")
+        else:
+            st.info("No trades match filters")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# ------ TAB 4: System Status ------
+with tab4:
+    st.subheader("System Status")
+
+    # Emergency tools
+    ec1, ec2 = st.columns(2)
+    with ec1:
+        if st.button("Emergency Revert Portfolio"):
+            if pm.emergency_revert():
+                st.success("Reverted from trade log")
+                st.rerun()
+    with ec2:
+        if st.button("Fix Cumulative PnL"):
+            if pm.fix_cumulative_pnl():
+                st.success("Fixed")
+                st.rerun()
+
+    # Diagnostics
+    st.subheader("Diagnostics")
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.markdown("**Settings**")
+        st.text(f"Capital: ${pm.initial_capital:,}")
+        st.text(f"Target Vol: {pm.target_volatility:.1%}")
+        st.text(f"Buffer: {pm.default_buffer_pct:.1%}")
+        cap = pm.get_portfolio_capital()
+        st.text(f"Current Capital: ${cap[0]:,.0f}")
+        st.text(f"Cash: ${cap[1]:,.0f}")
+        st.text(f"Realized PnL: ${cap[2]:,.0f}")
+
+    with dc2:
+        st.markdown("**Database**")
+        try:
+            with pf.db_connection() as conn:
+                cur = conn.cursor()
+                for tbl in ('current_positions', 'daily_portfolio_log',
+                            'trade_execution_log', 'buffer_settings',
+                            'price_data', 'strategy_signals'):
+                    try:
+                        cnt = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                        st.text(f"{tbl}: {cnt:,}")
+                    except Exception:
+                        st.text(f"{tbl}: not found")
+                # freshness
+                r = cur.execute(
+                    "SELECT MAX(timestamp) FROM price_data "
+                    "WHERE interval='1d' AND category='linear'"
+                ).fetchone()
+                st.text(f"Latest price: {r[0] if r else 'N/A'}")
+                r2 = cur.execute(
+                    "SELECT MAX(timestamp),MAX(created_at) FROM strategy_signals "
+                    "WHERE interval='1d' AND category='linear'"
+                ).fetchone()
+                if r2 and r2[0]:
+                    st.text(f"Latest signal: {r2[0]}")
+                    st.text(f"Signals computed: {r2[1]}")
+        except Exception as e:
+            st.error(str(e))
+
+    # Data quality
+    if selected_symbols:
+        st.subheader("Data Quality")
+        qc1, qc2 = st.columns(2)
+        with qc1:
+            st.markdown("**Price Data**")
+            try:
+                with pf.db_connection() as conn:
+                    for sym in selected_symbols[:5]:
+                        r = conn.execute(
+                            "SELECT COUNT(*),MIN(timestamp),MAX(timestamp) FROM price_data "
+                            "WHERE symbol=? AND interval='1d' AND category='linear'", (sym,)
+                        ).fetchone()
+                        if r and r[0]:
+                            st.text(f"{sym}: {r[0]} days ({r[1]} to {r[2]})")
+                        else:
+                            st.text(f"{sym}: no data")
+            except Exception as e:
+                st.error(str(e))
+        with qc2:
+            st.markdown("**Signal Quality**")
+            try:
+                with pf.db_connection() as conn:
+                    for sym in selected_symbols[:5]:
+                        r = conn.execute(
+                            "SELECT COUNT(*),AVG(ABS(combined_signal)) "
+                            "FROM strategy_signals WHERE symbol=? AND interval='1d' "
+                            "AND category='linear' AND combined_signal IS NOT NULL", (sym,)
+                        ).fetchone()
+                        if r and r[0]:
+                            avg = r[1] or 0
+                            st.text(f"{sym}: {r[0]} sigs, avg={avg:.1f}")
+                        else:
+                            st.text(f"{sym}: no signals")
+            except Exception as e:
+                st.error(str(e))
+
+    # Buffer management
+    st.subheader("Buffer Settings")
+    if selected_symbols:
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            bsym = st.selectbox("Symbol", selected_symbols, key="buf_sym")
+            bval = st.slider(f"Buffer for {bsym}", 0.05, 0.50,
+                              pm.get_buffer_setting(bsym), 0.01, key="buf_val")
+            if st.button("Update Buffer"):
+                with pf.db_connection() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO buffer_settings (symbol,buffer_pct,last_updated) "
+                        "VALUES (?,?,?)", (bsym, bval, datetime.now()))
+                    conn.commit()
+                st.success(f"Buffer updated for {bsym}")
+                st.rerun()
+            bulk = st.slider("Bulk buffer", 0.05, 0.50, 0.10, 0.01, key="bulk_buf")
+            if st.button("Apply to All"):
+                with pf.db_connection() as conn:
+                    for s in selected_symbols:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO buffer_settings (symbol,buffer_pct,last_updated) "
+                            "VALUES (?,?,?)", (s, bulk, datetime.now()))
+                    conn.commit()
+                st.success(f"Buffer={bulk:.1%} for {len(selected_symbols)} symbols")
+                st.rerun()
+        with bc2:
+            st.markdown("**Current Buffers**")
+            try:
+                with pf.db_connection() as conn:
+                    ph = ','.join('?' * len(selected_symbols))
+                    bdf = pd.read_sql_query(
+                        f"SELECT symbol, buffer_pct, last_updated FROM buffer_settings "
+                        f"WHERE symbol IN ({ph}) ORDER BY symbol",
+                        conn, params=selected_symbols,
+                    )
+                if not bdf.empty:
+                    bdf['Buffer%'] = (bdf['buffer_pct'] * 100).round(1)
+                    st.dataframe(bdf[['symbol', 'Buffer%']], use_container_width=True, hide_index=True)
+                else:
+                    st.info("Using defaults")
+            except Exception:
+                pass
+
+    # Portfolio reset
+    st.subheader("Portfolio Reset")
+    st.warning("This deletes ALL position data, trade logs, and portfolio history.")
+    confirm = st.checkbox("I understand", key="reset_confirm")
+    if confirm and st.button("RESET PORTFOLIO", key="reset_btn"):
+        try:
+            with pf.db_connection() as conn:
+                conn.execute('BEGIN')
+                for tbl in ('current_positions', 'daily_portfolio_log',
+                            'trade_execution_log', 'buffer_settings'):
+                    try:
+                        conn.execute(f"DELETE FROM {tbl}")
+                    except Exception:
+                        pass
+                conn.execute('COMMIT')
+            st.success("Portfolio reset complete")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+
+st.markdown("---")
+st.caption("Trading Dashboard | Signal-weighted allocation with buffer zones")
