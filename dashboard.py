@@ -391,7 +391,7 @@ with tab0:
                 st.plotly_chart(fig_combo, use_container_width=True, key="combo_chart")
 
             with col_panel:
-                # --- Forecast gauge (matching frcst.png) ---
+                # --- Forecast gauge ---
                 if not latest_sig.empty:
                     combined_val = float(latest_sig.iloc[0].get('combined_signal', 0) or 0)
                 else:
@@ -401,88 +401,76 @@ with tab0:
                     '<p style="font-size:13px;color:#999;margin:0 0 2px 0;font-weight:600;">Forecast</p>',
                     unsafe_allow_html=True)
 
-                # Thin outer arc = gradient steps, wide inner arc = fill to value
-                # Build color steps for thin outer ring
+                # Zone color function: dark red -> red -> cyan -> green -> dark green
+                def _zone_color(v):
+                    """Map value in [-20,+20] to zone color."""
+                    if v <= -10:
+                        return '#8b1a1a'  # dark red
+                    elif v <= -5:
+                        return '#d32f2f'  # red
+                    elif v <= 5:
+                        return '#00acc1'  # cyan (γαλάζιο)
+                    elif v <= 10:
+                        return '#43a047'  # green
+                    else:
+                        return '#1b5e20'  # dark green
+
+                # Gradient steps for the outer ring
+                # dark red -> red -> cyan -> green -> dark green
                 _gauge_steps = []
                 _n_seg = 40
                 for _i in range(_n_seg):
                     _lo = -20 + _i * (40 / _n_seg)
                     _hi = _lo + (40 / _n_seg)
-                    _t = _i / (_n_seg - 1)  # 0..1
-                    # dark red -> red -> gray -> green -> dark green
-                    if _t < 0.25:
-                        _r = int(140 + (200 - 140) * (_t / 0.25))
-                        _g = int(20 + (50 - 20) * (_t / 0.25))
-                        _b = 30
-                    elif _t < 0.5:
-                        _f = (_t - 0.25) / 0.25
-                        _r = int(200 - (200 - 100) * _f)
-                        _g = int(50 + (100 - 50) * _f)
-                        _b = int(30 + (80 - 30) * _f)
-                    elif _t < 0.75:
-                        _f = (_t - 0.5) / 0.25
-                        _r = int(100 - (100 - 50) * _f)
-                        _g = int(100 + (180 - 100) * _f)
-                        _b = int(80 - (80 - 40) * _f)
-                    else:
-                        _f = (_t - 0.75) / 0.25
-                        _r = int(50 - (50 - 20) * _f)
-                        _g = int(180 - (180 - 130) * _f)
-                        _b = int(40 - (40 - 20) * _f)
-                    _gauge_steps.append(dict(range=[_lo, _hi], color=f'rgb({_r},{_g},{_b})'))
+                    _mid = (_lo + _hi) / 2
+                    _gauge_steps.append(dict(range=[_lo, _hi], color=_zone_color(_mid)))
 
-                # Color for the filled bar (matches the value's position on the gradient)
-                _vt = max(0, min(1, (combined_val + 20) / 40))
-                if _vt < 0.25:
-                    _br, _bg_c, _bb = int(140 + 60 * (_vt / 0.25)), int(20 + 30 * (_vt / 0.25)), 30
-                elif _vt < 0.5:
-                    _f = (_vt - 0.25) / 0.25
-                    _br, _bg_c, _bb = int(200 - 100 * _f), int(50 + 50 * _f), int(30 + 50 * _f)
-                elif _vt < 0.75:
-                    _f = (_vt - 0.5) / 0.25
-                    _br, _bg_c, _bb = int(100 - 50 * _f), int(100 + 80 * _f), int(80 - 40 * _f)
-                else:
-                    _f = (_vt - 0.75) / 0.25
-                    _br, _bg_c, _bb = int(50 - 30 * _f), int(180 - 50 * _f), int(40 - 20 * _f)
-                _bar_color = f'rgb({_br},{_bg_c},{_bb})'
+                _val_color = _zone_color(combined_val)
 
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=combined_val,
-                    number=dict(font=dict(size=38, color='white'), valueformat='+.1f'),
+                    number=dict(
+                        font=dict(size=26, color=_val_color),
+                        valueformat='+.1f',
+                    ),
                     gauge=dict(
                         axis=dict(
                             range=[-20, 20],
-                            tickwidth=1, tickcolor='#666',
+                            tickwidth=1, tickcolor='#555',
                             tickvals=[-20, -15, -10, -5, 0, 5, 10, 15, 20],
-                            tickfont=dict(size=9, color='#888'),
-                            ticklen=6,
+                            tickfont=dict(size=10, color='#999'),
+                            ticklen=8,
                         ),
-                        bar=dict(color=_bar_color, thickness=0.65),
+                        # Bar = fill from -20 to value, full thickness so no
+                        # inner bleed of steps (removes the "third ring").
+                        bar=dict(color=_val_color, thickness=1.0),
                         bgcolor='#252530',
                         borderwidth=0,
+                        # Steps = outer gradient (visible only beyond the bar).
                         steps=_gauge_steps,
                         threshold=dict(
                             line=dict(color='white', width=2),
-                            thickness=0.82, value=combined_val,
+                            thickness=0.85, value=combined_val,
                         ),
                     ),
                 ))
                 fig_gauge.update_layout(
-                    height=180, margin=dict(l=18, r=18, t=24, b=0),
+                    height=195,
+                    margin=dict(l=30, r=30, t=30, b=8),
                     paper_bgcolor='#181924', font_color='#c0c0c0',
                 )
                 st.plotly_chart(fig_gauge, use_container_width=True, key="gauge_chart")
 
                 # --- Buy Rating ---
                 if combined_val <= -10:
-                    rating_text, rating_color = "Strong Sell", "#c62828"
+                    rating_text, rating_color = "Strong Sell", "#8b1a1a"
                 elif combined_val <= -5:
-                    rating_text, rating_color = "Sell", "#e53935"
+                    rating_text, rating_color = "Sell", "#d32f2f"
                 elif combined_val <= 5:
-                    rating_text, rating_color = "Neutral", "#546e7a"
+                    rating_text, rating_color = "Neutral", "#00acc1"
                 elif combined_val <= 10:
-                    rating_text, rating_color = "Buy", "#2e7d32"
+                    rating_text, rating_color = "Buy", "#43a047"
                 else:
                     rating_text, rating_color = "Strong Buy", "#1b5e20"
 
@@ -510,38 +498,18 @@ with tab0:
                         ('Combined', 'combined_signal'),
                     ]
 
-                    def _signal_bar_color(v):
-                        """Map signal value [-20,+20] to dark red -> dark green."""
-                        t = max(0.0, min(1.0, (v + 20) / 40))
-                        # Multi-stop gradient: dark red -> red -> dim -> green -> dark green
-                        if t < 0.25:
-                            r, g, b = 140 + int(60 * t / 0.25), 25, 25
-                        elif t < 0.45:
-                            f = (t - 0.25) / 0.20
-                            r, g, b = int(200 - 80 * f), int(25 + 55 * f), int(25 + 35 * f)
-                        elif t < 0.55:
-                            f = (t - 0.45) / 0.10
-                            r, g, b = int(120 - 40 * f), int(80 + 10 * f), int(60 + 10 * f)
-                        elif t < 0.75:
-                            f = (t - 0.55) / 0.20
-                            r, g, b = int(80 - 50 * f), int(90 + 80 * f), int(70 - 35 * f)
-                        else:
-                            f = (t - 0.75) / 0.25
-                            r, g, b = int(30 - 10 * f), int(170 - 40 * f), int(35 - 15 * f)
-                        return f'rgb({r},{g},{b})'
-
                     _sig_html = ''
                     for _label, _col_name in _sig_items:
                         _val = float(_row.get(_col_name, 0) or 0)
                         _pct = max(0, min(100, (_val + 20) / 40 * 100))
-                        _c = _signal_bar_color(_val)
+                        _c = _zone_color(_val)
                         _sig_html += f'''
                         <div style="display:flex;align-items:center;margin:3px 0;">
                           <span style="width:62px;font-size:11px;color:#bbb;flex-shrink:0;">{_label}</span>
                           <div style="flex:1;height:14px;background:#252530;border-radius:2px;overflow:hidden;margin:0 6px;">
-                            <div style="width:{_pct:.1f}%;height:100%;background:linear-gradient(90deg,#8b1a1a,{_c});border-radius:2px;"></div>
+                            <div style="width:{_pct:.1f}%;height:100%;background:{_c};border-radius:2px;"></div>
                           </div>
-                          <span style="width:36px;font-size:11px;color:white;text-align:right;">{_val:+.1f}</span>
+                          <span style="width:36px;font-size:11px;color:{_c};text-align:right;font-weight:600;">{_val:+.1f}</span>
                         </div>'''
                     st.markdown(_sig_html, unsafe_allow_html=True)
                 else:
