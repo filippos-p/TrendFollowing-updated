@@ -6,7 +6,7 @@ Run with:  streamlit run dashboard.py
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import streamlit as st
 import logging
@@ -64,6 +64,61 @@ def _prices(symbols):
 @st.cache_data(ttl=60)
 def _signals(symbols):
     return pf.get_latest_signals(list(symbols))
+
+
+@st.cache_data(ttl=120)
+def _ohlc_history(symbol, start_date=None, end_date=None):
+    """Fetch daily OHLC data for a symbol within an optional date range."""
+    with pf.db_connection() as conn:
+        q = ("SELECT timestamp, open, high, low, close, volume FROM price_data "
+             "WHERE symbol=? AND interval='1d' AND category='linear'")
+        params = [symbol]
+        if start_date:
+            q += " AND timestamp >= ?"
+            params.append(str(start_date))
+        if end_date:
+            q += " AND timestamp <= ?"
+            params.append(str(end_date))
+        q += " ORDER BY timestamp"
+        df = pd.read_sql_query(q, conn, params=params)
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    return df
+
+
+@st.cache_data(ttl=120)
+def _signal_history(symbol, start_date=None, end_date=None):
+    """Fetch full signal history for a symbol."""
+    with pf.db_connection() as conn:
+        q = ("SELECT timestamp, combined_signal, ewmac_combined, bolmom_combined, "
+             "breakout_combined, vol_forecast, close FROM strategy_signals "
+             "WHERE symbol=? AND interval='1d' AND category='linear'")
+        params = [symbol]
+        if start_date:
+            q += " AND timestamp >= ?"
+            params.append(str(start_date))
+        if end_date:
+            q += " AND timestamp <= ?"
+            params.append(str(end_date))
+        q += " ORDER BY timestamp"
+        df = pd.read_sql_query(q, conn, params=params)
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    return df
+
+
+@st.cache_data(ttl=120)
+def _latest_full_signals(symbol):
+    """Get the most recent row of all individual signals for a symbol."""
+    with pf.db_connection() as conn:
+        df = pd.read_sql_query(
+            "SELECT * FROM strategy_signals "
+            "WHERE symbol=? AND interval='1d' AND category='linear' "
+            "AND combined_signal IS NOT NULL "
+            "ORDER BY timestamp DESC LIMIT 1",
+            conn, params=[symbol],
+        )
+    return df
 
 
 def _load_positions(selected):
@@ -220,9 +275,249 @@ pm.default_buffer_pct = buf
 # Tabs
 # ========================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Position Management", "Portfolio Overview", "Trade Log", "System Status"
+tab0, tab1, tab2, tab3, tab4 = st.tabs([
+    "Symbol Analysis", "Position Management", "Portfolio Overview", "Trade Log", "System Status"
 ])
+
+# ------ TAB 0: Symbol Analysis ------
+with tab0:
+    if not selected_symbols:
+        st.info("Select symbols in the sidebar to begin.")
+    else:
+        # --- Symbol picker ---
+        sa_sym = st.selectbox("Symbol", selected_symbols, key="sa_sym")
+
+        # --- Date range controls ---
+        sa_rc1, sa_rc2, sa_rc3 = st.columns([2, 2, 3])
+        with sa_rc3:
+            sa_quick = st.selectbox(
+                "Quick range", ["Last 90 days", "Last 180 days", "Last 1 year",
+                                "Last 2 years", "All time", "Custom"],
+                index=0, key="sa_quick",
+            )
+        today = datetime.now().date()
+        if sa_quick == "Custom":
+            with sa_rc1:
+                sa_start = st.date_input("From", today - timedelta(days=90), key="sa_from")
+            with sa_rc2:
+                sa_end = st.date_input("To", today, key="sa_to")
+        else:
+            range_map = {
+                "Last 90 days": 90, "Last 180 days": 180,
+                "Last 1 year": 365, "Last 2 years": 730, "All time": None,
+            }
+            days = range_map.get(sa_quick)
+            sa_start = (today - timedelta(days=days)) if days else None
+            sa_end = today
+
+        # --- Load data ---
+        ohlc = _ohlc_history(sa_sym, sa_start, sa_end)
+        sig_hist = _signal_history(sa_sym, sa_start, sa_end)
+        latest_sig = _latest_full_signals(sa_sym)
+
+        if ohlc.empty:
+            st.warning(f"No price data for {sa_sym}.")
+        else:
+            # ============================================================
+            # ROW 1: Candlestick (left ~65%) | Gauge + Rating + Signals (right ~35%)
+            # ============================================================
+            row1_left, row1_right = st.columns([2, 1])
+
+            with row1_left:
+                st.markdown(f"#### Price Chart")
+                fig_candle = go.Figure(data=[go.Candlestick(
+                    x=ohlc['timestamp'], open=ohlc['open'], high=ohlc['high'],
+                    low=ohlc['low'], close=ohlc['close'],
+                    increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
+                    increasing_fillcolor='#26a69a', decreasing_fillcolor='#ef5350',
+                )])
+                fig_candle.update_layout(
+                    height=370, margin=dict(l=0, r=0, t=10, b=0),
+                    xaxis_rangeslider_visible=False,
+                    plot_bgcolor='#1e1e2f', paper_bgcolor='#1e1e2f',
+                    font_color='#c0c0c0',
+                    xaxis=dict(gridcolor='#2a2a3e', tickformat='%Y-%m-%d'),
+                    yaxis=dict(gridcolor='#2a2a3e', title='Price'),
+                )
+                st.plotly_chart(fig_candle, use_container_width=True, key="candle_chart")
+
+            with row1_right:
+                # --- Forecast gauge ---
+                if not latest_sig.empty:
+                    combined_val = float(latest_sig.iloc[0].get('combined_signal', 0) or 0)
+                else:
+                    combined_val = 0.0
+
+                st.markdown("#### Forecast")
+                fig_gauge = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=combined_val,
+                    number=dict(font=dict(size=36, color='white')),
+                    gauge=dict(
+                        axis=dict(range=[-20, 20], tickwidth=1, tickcolor='#555',
+                                  tickvals=[-20, -10, -5, 0, 5, 10, 20]),
+                        bar=dict(color='#4fc3f7', thickness=0.3),
+                        bgcolor='#1e1e2f',
+                        borderwidth=0,
+                        steps=[
+                            dict(range=[-20, -10], color='#b71c1c'),
+                            dict(range=[-10, -5], color='#e53935'),
+                            dict(range=[-5, 5], color='#616161'),
+                            dict(range=[5, 10], color='#43a047'),
+                            dict(range=[10, 20], color='#1b5e20'),
+                        ],
+                        threshold=dict(line=dict(color='white', width=3),
+                                       thickness=0.8, value=combined_val),
+                    ),
+                ))
+                fig_gauge.update_layout(
+                    height=200, margin=dict(l=20, r=20, t=30, b=0),
+                    paper_bgcolor='#1e1e2f', font_color='#c0c0c0',
+                )
+                st.plotly_chart(fig_gauge, use_container_width=True, key="gauge_chart")
+
+                # --- Buy Rating ---
+                if combined_val <= -10:
+                    rating_text, rating_color = "Strong Sell", "#b71c1c"
+                elif combined_val <= -5:
+                    rating_text, rating_color = "Sell", "#e53935"
+                elif combined_val <= 5:
+                    rating_text, rating_color = "Neutral", "#616161"
+                elif combined_val <= 10:
+                    rating_text, rating_color = "Buy", "#43a047"
+                else:
+                    rating_text, rating_color = "Strong Buy", "#1b5e20"
+
+                st.markdown(
+                    f"""<div style="text-align:center; padding:8px 0 12px 0;">
+                    <span style="font-size:11px; color:#888;">Buy Rating</span><br>
+                    <span style="font-size:22px; font-weight:700; color:white;
+                    background:{rating_color}; padding:6px 18px; border-radius:6px;
+                    display:inline-block; margin-top:4px;">{rating_text}</span>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+                # --- Signals heatmap ---
+                st.markdown(
+                    '<span style="font-size:11px; color:#888;">Signals</span>',
+                    unsafe_allow_html=True,
+                )
+                if not latest_sig.empty:
+                    row = latest_sig.iloc[0]
+                    sig_names = [
+                        ('EWMAC', 'ewmac_combined'),
+                        ('BOLMOM', 'bolmom_combined'),
+                        ('Breakout', 'breakout_combined'),
+                        ('EWMAC 2/8', 'ewmac_2_8'),
+                        ('EWMAC 4/16', 'ewmac_4_16'),
+                        ('EWMAC 8/32', 'ewmac_8_32'),
+                        ('EWMAC 16/64', 'ewmac_16_64'),
+                        ('EWMAC 32/128', 'ewmac_32_128'),
+                        ('BolMom 8', 'bolmom_8'),
+                        ('BolMom 16', 'bolmom_16'),
+                        ('BolMom 32', 'bolmom_32'),
+                        ('BolMom 64', 'bolmom_64'),
+                        ('BolMom 128', 'bolmom_128'),
+                        ('BolMom 256', 'bolmom_256'),
+                        ('Brk 10', 'breakout_10'),
+                        ('Brk 20', 'breakout_20'),
+                        ('Brk 40', 'breakout_40'),
+                        ('Brk 80', 'breakout_80'),
+                        ('Brk 160', 'breakout_160'),
+                        ('Brk 320', 'breakout_320'),
+                    ]
+                    html_rows = ""
+                    for label, col in sig_names:
+                        val = float(row.get(col, 0) or 0)
+                        # color: red (-20) -> gray (0) -> green (+20)
+                        t = (val + 20) / 40  # 0..1
+                        t = max(0, min(1, t))
+                        if t < 0.5:
+                            r_c = int(180 + (100 - 180) * (t / 0.5))
+                            g_c = int(30 + (100 - 30) * (t / 0.5))
+                            b_c = int(30 + (100 - 30) * (t / 0.5))
+                        else:
+                            r_c = int(100 + (40 - 100) * ((t - 0.5) / 0.5))
+                            g_c = int(100 + (180 - 100) * ((t - 0.5) / 0.5))
+                            b_c = int(100 + (60 - 100) * ((t - 0.5) / 0.5))
+                        bg = f"rgb({r_c},{g_c},{b_c})"
+                        html_rows += (
+                            f'<tr><td style="padding:1px 6px;font-size:11px;color:#ccc;">{label}</td>'
+                            f'<td style="padding:1px 6px;font-size:11px;color:white;'
+                            f'background:{bg};text-align:right;border-radius:2px;">'
+                            f'{val:+.1f}</td></tr>'
+                        )
+                    st.markdown(
+                        f'<table style="width:100%;border-collapse:collapse;">{html_rows}</table>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.caption("No signal data available.")
+
+            # ============================================================
+            # ROW 2: Forecasts chart
+            # ============================================================
+            if not sig_hist.empty:
+                st.markdown("#### Forecasts")
+                fig_fc = go.Figure()
+                fig_fc.add_trace(go.Scatter(
+                    x=sig_hist['timestamp'], y=sig_hist['combined_signal'],
+                    mode='lines', name='Combined',
+                    line=dict(color='#4fc3f7', width=2.5),
+                ))
+                for col, name, color in [
+                    ('ewmac_combined', 'EWMAC', '#ab47bc'),
+                    ('bolmom_combined', 'BOLMOM', '#ff7043'),
+                    ('breakout_combined', 'Breakout', '#66bb6a'),
+                ]:
+                    if col in sig_hist.columns:
+                        fig_fc.add_trace(go.Scatter(
+                            x=sig_hist['timestamp'], y=sig_hist[col],
+                            mode='lines', name=name,
+                            line=dict(color=color, width=1.2),
+                            opacity=0.7,
+                        ))
+                fig_fc.add_hline(y=0, line_dash="dash", line_color="#555", line_width=1)
+                fig_fc.update_layout(
+                    height=280, margin=dict(l=0, r=0, t=10, b=0),
+                    plot_bgcolor='#1e1e2f', paper_bgcolor='#1e1e2f',
+                    font_color='#c0c0c0', legend=dict(orientation='h', y=1.08),
+                    xaxis=dict(gridcolor='#2a2a3e', tickformat='%Y-%m-%d'),
+                    yaxis=dict(gridcolor='#2a2a3e', title='Signal', range=[-22, 22]),
+                )
+                st.plotly_chart(fig_fc, use_container_width=True, key="forecast_chart")
+
+            # ============================================================
+            # ROW 3: Relative Position Size
+            # ============================================================
+            if not sig_hist.empty and 'vol_forecast' in sig_hist.columns and 'close' in sig_hist.columns:
+                st.markdown("#### Relative Position Size")
+                sh = sig_hist.copy()
+                sh['block_value'] = sh['vol_forecast'] * sh['close'] * np.sqrt(365)
+                sh['rel_position'] = np.where(
+                    sh['block_value'] > 0,
+                    (sh['combined_signal'] * pm.target_volatility) / (sh['block_value'] * cfg.POSITION_DIVISOR),
+                    0,
+                )
+
+                fig_pos = go.Figure()
+                pos_colors = np.where(sh['rel_position'] >= 0, '#26a69a', '#ef5350')
+                fig_pos.add_trace(go.Bar(
+                    x=sh['timestamp'], y=sh['rel_position'],
+                    marker_color=pos_colors.tolist(),
+                    name='Position Size',
+                ))
+                fig_pos.add_hline(y=0, line_color="#555", line_width=1)
+                fig_pos.update_layout(
+                    height=220, margin=dict(l=0, r=0, t=10, b=0),
+                    plot_bgcolor='#1e1e2f', paper_bgcolor='#1e1e2f',
+                    font_color='#c0c0c0',
+                    xaxis=dict(gridcolor='#2a2a3e', tickformat='%Y-%m-%d'),
+                    yaxis=dict(gridcolor='#2a2a3e', title='Relative Size'),
+                    bargap=0.05,
+                )
+                st.plotly_chart(fig_pos, use_container_width=True, key="pos_size_chart")
 
 # ------ TAB 1: Positions ------
 with tab1:
