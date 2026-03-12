@@ -472,6 +472,7 @@ with tab0:
                     '<p style="font-size:13px;color:#999;margin:0 0 2px 0;font-weight:600;">Forecast</p>',
                     unsafe_allow_html=True)
 
+                # Outer ring: thin gradient zones with tick labels
                 _gauge_steps = []
                 for _i in range(40):
                     _lo = -20 + _i
@@ -480,14 +481,12 @@ with tab0:
                 _val_color = _zone_color(combined_val)
                 _rounded_val = round(combined_val, 1)
 
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
+                fig_gauge = go.Figure()
+
+                # Trace 1: Outer thin ring — gradient + ticks
+                fig_gauge.add_trace(go.Indicator(
+                    mode="gauge",
                     value=_rounded_val,
-                    number=dict(
-                        font=dict(size=28, color=_val_color, family='Arial'),
-                        valueformat='+.1f',
-                    ),
-                    domain=dict(x=[0.05, 0.95], y=[0.05, 1]),
                     gauge=dict(
                         shape='angular',
                         axis=dict(
@@ -497,18 +496,48 @@ with tab0:
                             tickfont=dict(size=10, color='#999'),
                             ticklen=8,
                         ),
-                        bar=dict(color=_val_color, thickness=1.0),
-                        bgcolor='#252530',
+                        bar=dict(color='rgba(0,0,0,0)', thickness=0),
+                        bgcolor='rgba(0,0,0,0)',
                         borderwidth=0,
                         steps=_gauge_steps,
+                    ),
+                    domain=dict(x=[0.0, 1.0], y=[0.0, 1.0]),
+                ))
+
+                # Trace 2: Inner wide ring — solid fill from opposite extreme to value
+                # Positive: bar fills -20 → value (natural). Negative: steps fill value → +20.
+                if _rounded_val >= 0:
+                    _inner_bar = dict(color=_val_color, thickness=1.0)
+                    _inner_steps = []
+                else:
+                    _inner_bar = dict(color='rgba(0,0,0,0)', thickness=0)
+                    _inner_steps = [dict(range=[_rounded_val, 20], color=_val_color)]
+
+                fig_gauge.add_trace(go.Indicator(
+                    mode="gauge+number",
+                    value=_rounded_val,
+                    number=dict(
+                        font=dict(size=28, color=_val_color, family='Arial'),
+                        valueformat='+.1f',
+                    ),
+                    gauge=dict(
+                        shape='angular',
+                        axis=dict(range=[-20, 20], visible=False),
+                        bar=_inner_bar,
+                        bgcolor='#252530',
+                        borderwidth=0,
+                        steps=_inner_steps,
                         threshold=dict(
                             line=dict(color='white', width=2),
                             thickness=0.85, value=_rounded_val,
                         ),
                     ),
+                    # Inset domain: 3:1 ratio means outer ~1/4, inner ~3/4 of arc width
+                    domain=dict(x=[0.13, 0.87], y=[0.13, 0.87]),
                 ))
+
                 fig_gauge.update_layout(
-                    height=200,
+                    height=210,
                     margin=dict(l=34, r=34, t=34, b=4),
                     paper_bgcolor=_dark_bg, font_color='#c0c0c0',
                 )
