@@ -2,7 +2,7 @@
 
 A live crypto trading dashboard built with Streamlit, implementing Robert Carver's systematic trading framework. Fetches data from Bybit, generates trading signals, and manages positions with volatility-targeted sizing.
 
-![Dashboard](checkpic.PNG)
+![Dashboard](disppic1.PNG)
 
 ## Features
 
