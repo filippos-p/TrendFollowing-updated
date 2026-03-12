@@ -7,6 +7,10 @@ Momentum research on cryptocurrency markets, signal construction from Robert Car
 ![Dashboard 3](disppic3.PNG)
 ![Dashboard 4](disppic4.PNG)
 
+We also created a new tab, where you can see the combined and individual forecasts as a timeseries for each coin in the trading universe. Along with that there is a relative (to the allocation weight — reminder that we equal weight all the coins from our universe) position size as a bar chart, where you can see the calculated position for each coin. This helps visualize what kind of position (both in size and in direction) we take and how price moves after our position. Or you can flip it and see what kind of positions we take because of the current price. After all we are just trend following and our position just scales based on the product of the (price constructed) signal times our volatility target exposure relative to the recent volatility.
+
+![Symbol Analysis](newtab.png)
+
 ---
 
 ## Theoretical Framework
