@@ -354,12 +354,12 @@ with tab0:
             if _has_pos:
                 _sh = sig_hist.copy()
                 _sh['block_value'] = _sh['vol_forecast'] * _sh['close'] * np.sqrt(365)
-                _sh['pos_pct'] = np.where(
+                _sh['pos_pct'] = np.clip(np.where(
                     _sh['block_value'] > 0,
                     (_sh['combined_signal'] * pm.target_volatility * _sh['close'])
                     / (_sh['block_value'] * cfg.POSITION_DIVISOR) * 100,
                     0,
-                )
+                ), -100, 100)
 
             _n_rows = 1 + (1 if not sig_hist.empty else 0) + (1 if _has_pos else 0)
             _row_heights = [0.50]
@@ -506,12 +506,13 @@ with tab0:
 
                 # Trace 2: Inner wide ring — solid fill from opposite extreme to value
                 # Positive: bar fills -20 → value (natural). Negative: steps fill value → +20.
+                # Slightly over-extended range [-21, 21] so fill reaches the visual ±20 edges
                 if _rounded_val >= 0:
                     _inner_bar = dict(color=_val_color, thickness=1.0)
                     _inner_steps = []
                 else:
                     _inner_bar = dict(color='rgba(0,0,0,0)', thickness=0)
-                    _inner_steps = [dict(range=[_rounded_val, 20], color=_val_color)]
+                    _inner_steps = [dict(range=[_rounded_val, 21], color=_val_color)]
 
                 fig_gauge.add_trace(go.Indicator(
                     mode="gauge+number",
@@ -522,7 +523,7 @@ with tab0:
                     ),
                     gauge=dict(
                         shape='angular',
-                        axis=dict(range=[-20, 20], visible=False),
+                        axis=dict(range=[-21, 21], visible=False),
                         bar=_inner_bar,
                         bgcolor='#252530',
                         borderwidth=0,
@@ -532,8 +533,9 @@ with tab0:
                             thickness=0.85, value=_rounded_val,
                         ),
                     ),
-                    # Inset domain: 3:1 ratio means outer ~1/4, inner ~3/4 of arc width
-                    domain=dict(x=[0.13, 0.87], y=[0.13, 0.87]),
+                    # Inset domain: 5:1 inner:outer width ratio
+                    # outer_edge ≈ 1/12 on each side → d ≈ 0.05
+                    domain=dict(x=[0.05, 0.95], y=[0.05, 0.95]),
                 ))
 
                 fig_gauge.update_layout(
