@@ -260,6 +260,12 @@ if st.sidebar.button("Update Data + Signals", key="btn_both"):
                 )
                 st.success(f"Data + {sok} signals updated")
                 _do_mtm()
+                _universe.clear()
+                _prices.clear()
+                _signals.clear()
+                _ohlc_history.clear()
+                _signal_history.clear()
+                _latest_full_signals.clear()
                 st.rerun()
             else:
                 st.error(msg)
@@ -327,68 +333,122 @@ with tab0:
             st.warning(f"No price data for {sa_sym}.")
         else:
             # ============================================================
-            # LEFT: Stacked candlestick + forecasts  |  RIGHT: gauge + rating + signals
+            # LEFT: Price + Forecasts + Position  |  RIGHT: gauge + rating + signals
             # ============================================================
+            _dark_bg = '#181924'
+            _grid = '#2a2a3e'
+
+            # Common x-range for alignment across all three charts
+            _x_min = ohlc['timestamp'].min()
+            _x_max = ohlc['timestamp'].max()
+
+            # Shared axis/hover styling applied to each chart
+            def _common_xaxis(show_ticks=False):
+                d = dict(
+                    gridcolor=_grid, tickformat='%d %b %Y',
+                    range=[_x_min, _x_max],
+                    showspikes=True, spikemode='across', spikethickness=1,
+                    spikecolor='#666', spikesnap='cursor', spikedash='dot',
+                )
+                if not show_ticks:
+                    d['showticklabels'] = False
+                return d
+
             col_charts, col_panel = st.columns([5, 2])
 
             with col_charts:
-                # --- Build combined figure: candlestick on top, forecasts below ---
-                from plotly.subplots import make_subplots
-                fig_combo = make_subplots(
-                    rows=2, cols=1, shared_xaxes=True,
-                    vertical_spacing=0.03,
-                    row_heights=[0.6, 0.4],
-                    subplot_titles=[sa_sym, 'Forecasts'],
-                )
-
-                # Candlestick
-                fig_combo.add_trace(go.Candlestick(
+                # --- 1. Candlestick ---
+                st.markdown(f'<p style="font-size:12px;color:#999;margin:0 0 -8px 4px;">{sa_sym}</p>',
+                            unsafe_allow_html=True)
+                fig_price = go.Figure(data=[go.Candlestick(
                     x=ohlc['timestamp'], open=ohlc['open'], high=ohlc['high'],
                     low=ohlc['low'], close=ohlc['close'],
                     increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
                     increasing_fillcolor='#26a69a', decreasing_fillcolor='#ef5350',
-                    name='Price', showlegend=False,
-                ), row=1, col=1)
+                    name='Price',
+                )])
+                fig_price.update_layout(
+                    height=300, margin=dict(l=0, r=0, t=6, b=0),
+                    plot_bgcolor=_dark_bg, paper_bgcolor=_dark_bg,
+                    font=dict(color='#c0c0c0', size=11),
+                    xaxis=_common_xaxis(show_ticks=False),
+                    xaxis_rangeslider_visible=False,
+                    yaxis=dict(gridcolor=_grid, title='Price', side='right'),
+                    hovermode='x', showlegend=False,
+                )
+                st.plotly_chart(fig_price, use_container_width=True, key="price_chart")
 
-                # Forecasts
+                # --- 2. Forecasts ---
                 if not sig_hist.empty:
-                    fig_combo.add_trace(go.Scatter(
+                    st.markdown('<p style="font-size:12px;color:#999;margin:-12px 0 -8px 4px;">Forecasts</p>',
+                                unsafe_allow_html=True)
+                    fig_fc = go.Figure()
+                    # Combined = solid blue
+                    fig_fc.add_trace(go.Scatter(
                         x=sig_hist['timestamp'], y=sig_hist['combined_signal'],
                         mode='lines', name='Combined',
-                        line=dict(color='white', width=2),
-                    ), row=2, col=1)
+                        line=dict(color='#42a5f5', width=2.2),
+                    ))
+                    # Individual = dotted, distinct colors
                     for _col, _name, _clr in [
                         ('ewmac_combined', 'EWMAC', '#ab47bc'),
                         ('bolmom_combined', 'BOLMOM', '#ff7043'),
                         ('breakout_combined', 'Breakout', '#66bb6a'),
                     ]:
                         if _col in sig_hist.columns:
-                            fig_combo.add_trace(go.Scatter(
+                            fig_fc.add_trace(go.Scatter(
                                 x=sig_hist['timestamp'], y=sig_hist[_col],
                                 mode='lines', name=_name,
-                                line=dict(color=_clr, width=1.2),
-                                opacity=0.75,
-                            ), row=2, col=1)
-                    fig_combo.add_hline(y=0, line_dash="dot", line_color="#555",
-                                        line_width=1, row=2, col=1)
+                                line=dict(color=_clr, width=1.3, dash='dot'),
+                                opacity=0.8,
+                            ))
+                    fig_fc.add_hline(y=0, line_dash="dot", line_color="#555", line_width=1)
+                    fig_fc.update_layout(
+                        height=220, margin=dict(l=0, r=0, t=6, b=0),
+                        plot_bgcolor=_dark_bg, paper_bgcolor=_dark_bg,
+                        font=dict(color='#c0c0c0', size=11),
+                        legend=dict(orientation='h', y=1.06, x=0.5, xanchor='center',
+                                    font=dict(size=10)),
+                        xaxis=_common_xaxis(show_ticks=False),
+                        yaxis=dict(gridcolor=_grid, title='Signal', side='right',
+                                   range=[-22, 22]),
+                        hovermode='x',
+                    )
+                    st.plotly_chart(fig_fc, use_container_width=True, key="forecast_chart")
 
-                _dark_bg = '#181924'
-                _grid = '#2a2a3e'
-                fig_combo.update_layout(
-                    height=560, margin=dict(l=0, r=0, t=28, b=0),
-                    plot_bgcolor=_dark_bg, paper_bgcolor=_dark_bg,
-                    font=dict(color='#c0c0c0', size=11),
-                    legend=dict(orientation='h', y=-0.04, x=0.5, xanchor='center',
-                                font=dict(size=10)),
-                    xaxis_rangeslider_visible=False,
-                    xaxis2=dict(gridcolor=_grid, tickformat='%b %Y'),
-                    yaxis=dict(gridcolor=_grid, title='Price'),
-                    yaxis2=dict(gridcolor=_grid, title='Signal', range=[-22, 22]),
-                    hovermode='x unified',
-                )
-                fig_combo.update_xaxes(gridcolor=_grid, row=1, col=1)
-                fig_combo.update_annotations(font_size=12, font_color='#999')
-                st.plotly_chart(fig_combo, use_container_width=True, key="combo_chart")
+                # --- 3. Relative Position Size ---
+                if not sig_hist.empty and 'vol_forecast' in sig_hist.columns and 'close' in sig_hist.columns:
+                    st.markdown('<p style="font-size:12px;color:#999;margin:-12px 0 -8px 4px;">Relative Position Size</p>',
+                                unsafe_allow_html=True)
+                    _sh = sig_hist.copy()
+                    _sh['block_value'] = _sh['vol_forecast'] * _sh['close'] * np.sqrt(365)
+                    _sh['pos_pct'] = np.where(
+                        _sh['block_value'] > 0,
+                        (_sh['combined_signal'] * pm.target_volatility * _sh['close'])
+                        / (_sh['block_value'] * cfg.POSITION_DIVISOR) * 100,
+                        0,
+                    )
+
+                    fig_pos = go.Figure()
+                    _pos_colors = np.where(_sh['pos_pct'] >= 0, '#26a69a', '#ef5350')
+                    fig_pos.add_trace(go.Bar(
+                        x=_sh['timestamp'], y=_sh['pos_pct'],
+                        marker_color=_pos_colors.tolist(),
+                        name='Position %',
+                        hovertemplate='%{x|%Y-%m-%d}<br>%{y:+.1f}%<extra></extra>',
+                    ))
+                    fig_pos.add_hline(y=0, line_color="#555", line_width=1)
+                    fig_pos.update_layout(
+                        height=170, margin=dict(l=0, r=0, t=6, b=0),
+                        plot_bgcolor=_dark_bg, paper_bgcolor=_dark_bg,
+                        font=dict(color='#c0c0c0', size=11),
+                        xaxis=_common_xaxis(show_ticks=True),
+                        yaxis=dict(gridcolor=_grid, title='% Alloc', side='right',
+                                   ticksuffix='%'),
+                        bargap=0.05, showlegend=False,
+                        hovermode='x',
+                    )
+                    st.plotly_chart(fig_pos, use_container_width=True, key="pos_size_chart")
 
             with col_panel:
                 # --- Forecast gauge ---
@@ -397,44 +457,39 @@ with tab0:
                 else:
                     combined_val = 0.0
 
+                # Zone color function: dark red -> red -> cyan -> green -> dark green
+                def _zone_color(v):
+                    if v <= -10: return '#8b1a1a'
+                    elif v <= -5: return '#d32f2f'
+                    elif v <= 5: return '#00acc1'
+                    elif v <= 10: return '#43a047'
+                    else: return '#1b5e20'
+
                 st.markdown(
                     '<p style="font-size:13px;color:#999;margin:0 0 2px 0;font-weight:600;">Forecast</p>',
                     unsafe_allow_html=True)
 
-                # Zone color function: dark red -> red -> cyan -> green -> dark green
-                def _zone_color(v):
-                    """Map value in [-20,+20] to zone color."""
-                    if v <= -10:
-                        return '#8b1a1a'  # dark red
-                    elif v <= -5:
-                        return '#d32f2f'  # red
-                    elif v <= 5:
-                        return '#00acc1'  # cyan (γαλάζιο)
-                    elif v <= 10:
-                        return '#43a047'  # green
-                    else:
-                        return '#1b5e20'  # dark green
-
-                # Gradient steps for the outer ring
-                # dark red -> red -> cyan -> green -> dark green
                 _gauge_steps = []
                 _n_seg = 40
                 for _i in range(_n_seg):
                     _lo = -20 + _i * (40 / _n_seg)
                     _hi = _lo + (40 / _n_seg)
-                    _mid = (_lo + _hi) / 2
-                    _gauge_steps.append(dict(range=[_lo, _hi], color=_zone_color(_mid)))
+                    _gauge_steps.append(dict(range=[_lo, _hi], color=_zone_color((_lo + _hi) / 2)))
 
                 _val_color = _zone_color(combined_val)
+                _rounded_val = round(combined_val, 1)
 
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
-                    value=combined_val,
+                    value=_rounded_val,
                     number=dict(
-                        font=dict(size=26, color=_val_color),
+                        font=dict(size=28, color=_val_color, family='Arial'),
                         valueformat='+.1f',
+                        suffix='',
                     ),
+                    domain=dict(x=[0, 1], y=[0.08, 1]),
                     gauge=dict(
+                        shape='angular',
                         axis=dict(
                             range=[-20, 20],
                             tickwidth=1, tickcolor='#555',
@@ -442,23 +497,20 @@ with tab0:
                             tickfont=dict(size=10, color='#999'),
                             ticklen=8,
                         ),
-                        # Bar = fill from -20 to value, full thickness so no
-                        # inner bleed of steps (removes the "third ring").
                         bar=dict(color=_val_color, thickness=1.0),
                         bgcolor='#252530',
                         borderwidth=0,
-                        # Steps = outer gradient (visible only beyond the bar).
                         steps=_gauge_steps,
                         threshold=dict(
                             line=dict(color='white', width=2),
-                            thickness=0.85, value=combined_val,
+                            thickness=0.85, value=_rounded_val,
                         ),
                     ),
                 ))
                 fig_gauge.update_layout(
                     height=195,
-                    margin=dict(l=30, r=30, t=30, b=8),
-                    paper_bgcolor='#181924', font_color='#c0c0c0',
+                    margin=dict(l=32, r=32, t=32, b=0),
+                    paper_bgcolor=_dark_bg, font_color='#c0c0c0',
                 )
                 st.plotly_chart(fig_gauge, use_container_width=True, key="gauge_chart")
 
@@ -514,49 +566,6 @@ with tab0:
                     st.markdown(_sig_html, unsafe_allow_html=True)
                 else:
                     st.caption("No signal data.")
-
-            # ============================================================
-            # Relative Position Size
-            # ============================================================
-            if not sig_hist.empty and 'vol_forecast' in sig_hist.columns and 'close' in sig_hist.columns:
-                st.markdown("#### Relative Position Size")
-                st.caption(
-                    "Position as % of per-symbol capital allocation. "
-                    "+100% = fully long, -100% = fully short."
-                )
-                _sh = sig_hist.copy()
-                # block_value = vol * price * sqrt(365)
-                _sh['block_value'] = _sh['vol_forecast'] * _sh['close'] * np.sqrt(365)
-                # vol_scalar = target_vol * alloc_capital / block_value
-                # position_coins = signal * vol_scalar / 10
-                # position_usd = position_coins * price = signal * target_vol * alloc / (block_value * 10) * price
-                # position_pct = position_usd / alloc * 100 = signal * target_vol * price / (block_value * 10) * 100
-                _sh['pos_pct'] = np.where(
-                    _sh['block_value'] > 0,
-                    (_sh['combined_signal'] * pm.target_volatility * _sh['close'])
-                    / (_sh['block_value'] * cfg.POSITION_DIVISOR) * 100,
-                    0,
-                )
-
-                fig_pos = go.Figure()
-                _pos_colors = np.where(_sh['pos_pct'] >= 0, '#26a69a', '#ef5350')
-                fig_pos.add_trace(go.Bar(
-                    x=_sh['timestamp'], y=_sh['pos_pct'],
-                    marker_color=_pos_colors.tolist(),
-                    name='Position %',
-                    hovertemplate='%{x|%Y-%m-%d}<br>Position: %{y:+.1f}%<extra></extra>',
-                ))
-                fig_pos.add_hline(y=0, line_color="#555", line_width=1)
-                fig_pos.update_layout(
-                    height=200, margin=dict(l=0, r=0, t=10, b=0),
-                    plot_bgcolor='#181924', paper_bgcolor='#181924',
-                    font=dict(color='#c0c0c0', size=11),
-                    xaxis=dict(gridcolor=_grid, tickformat='%b %Y'),
-                    yaxis=dict(gridcolor=_grid, title='% of Allocation',
-                               ticksuffix='%'),
-                    bargap=0.05, showlegend=False,
-                )
-                st.plotly_chart(fig_pos, use_container_width=True, key="pos_size_chart")
 
 # ------ TAB 1: Positions ------
 with tab1:
