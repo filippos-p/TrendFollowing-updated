@@ -548,7 +548,7 @@ with tab0:
                 # 6. Value in center
                 fig_gauge.add_annotation(
                     text=f"<b>{_rounded_val:+.1f}</b>",
-                    x=0.5, y=0.18, xref='paper', yref='paper',
+                    x=0.5, y=0.08, xref='paper', yref='paper',
                     font=dict(size=28, color=_val_color, family='Arial'),
                     showarrow=False,
                 )
