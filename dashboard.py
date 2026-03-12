@@ -74,10 +74,10 @@ def _ohlc_history(symbol, start_date=None, end_date=None):
              "WHERE symbol=? AND interval='1d' AND category='linear'")
         params = [symbol]
         if start_date:
-            q += " AND timestamp >= ?"
+            q += " AND date(timestamp) >= ?"
             params.append(str(start_date))
         if end_date:
-            q += " AND timestamp <= ?"
+            q += " AND date(timestamp) <= ?"
             params.append(str(end_date))
         q += " ORDER BY timestamp"
         df = pd.read_sql_query(q, conn, params=params)
@@ -95,10 +95,10 @@ def _signal_history(symbol, start_date=None, end_date=None):
              "WHERE symbol=? AND interval='1d' AND category='linear'")
         params = [symbol]
         if start_date:
-            q += " AND timestamp >= ?"
+            q += " AND date(timestamp) >= ?"
             params.append(str(start_date))
         if end_date:
-            q += " AND timestamp <= ?"
+            q += " AND date(timestamp) <= ?"
             params.append(str(end_date))
         q += " ORDER BY timestamp"
         df = pd.read_sql_query(q, conn, params=params)
@@ -550,10 +550,32 @@ with tab0:
                         ('Combined', 'combined_signal'),
                     ]
 
+                    def _smooth_color(v):
+                        """Smooth gradient: dark red(-20) -> red(-10) -> cyan(0) -> green(+10) -> dark green(+20)."""
+                        t = max(0.0, min(1.0, (v + 20) / 40))  # 0..1
+                        # 5-stop gradient with smooth interpolation
+                        stops = [
+                            (0.00, (139, 26, 26)),    # dark red  at -20
+                            (0.25, (211, 47, 47)),    # red       at -10
+                            (0.50, (0, 172, 193)),     # cyan      at  0
+                            (0.75, (67, 160, 71)),     # green     at +10
+                            (1.00, (27, 94, 32)),      # dark green at +20
+                        ]
+                        for i in range(len(stops) - 1):
+                            t0, c0 = stops[i]
+                            t1, c1 = stops[i + 1]
+                            if t <= t1:
+                                f = (t - t0) / (t1 - t0) if t1 > t0 else 0
+                                r = int(c0[0] + (c1[0] - c0[0]) * f)
+                                g = int(c0[1] + (c1[1] - c0[1]) * f)
+                                b = int(c0[2] + (c1[2] - c0[2]) * f)
+                                return f'rgb({r},{g},{b})'
+                        return f'rgb({stops[-1][1][0]},{stops[-1][1][1]},{stops[-1][1][2]})'
+
                     _sig_html = ''
                     for _label, _col_name in _sig_items:
                         _val = float(_row.get(_col_name, 0) or 0)
-                        _c = _zone_color(_val)
+                        _c = _smooth_color(_val)
                         # Center-aligned: 0 = 50%, bar extends left or right from center
                         _bar_pct = abs(_val) / 20 * 50  # max 50% of total width
                         if _val >= 0:
