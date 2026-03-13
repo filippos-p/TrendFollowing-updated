@@ -16,20 +16,22 @@ We also created a new tab, where you can see the combined and individual forecas
 ## Theoretical Framework
 
 In this repo, we will show some of the findings from momentum research on Cryptocurrency markets and then provide a simple idea on portfolio construction.
-For this process four files will be created:
+For this process two files will be created:
 
-      1) data_fetching : will download and store the data that we need for our analysis.
+      1) data_fetcher : will download and store the data that we need for our analysis.
 
-      2) signals : will showcase the construction of our momentum signals.
+      2) strategy : will showcase the construction of our momentum signals.
 
       3) utilities : will assist with choosing appropriate signal weights in the portfolio.
 
       4) research : will show our findings.
 
+      Files 3) and 4) are very simple and will be omitted.
 
-**1) data fetching:**
 
-The first two functions (**generate_dates**, **split_list_into_chunks**) are created due to Bybit's API limit requests. For the data that we need there is a limit of 1000 data points per request.
+**1) data fetcher:**
+
+The function **_split_time_range** is created due to Bybit's API limit requests. For the data that we need there is a limit of 1000 data points per request.
 In our research we will use daily data from 2018, with each day corresponding to one data point. So we need to split our dates in batches of 1000 days.
 
 Then we will use the function **fetch_klines** that performs one request (of 1000 data points) and pulls data for a single coin.
@@ -40,7 +42,7 @@ From these data we will mostly use:
 
 Here we need to note that the closing price is **not tradeable**, so any assumptions based on trading at that price are baseless. But we won't use it for that purposes.
 
-The function **fetch_klines_for_symbols** performs the previous operation for multiple symbols simultaneously using a ThreadPoolExecutor and also applies the **split_list_into_chunks** function in order to retrieve data for longer than 1000 days.
+The function **fetch_multi_symbol_data** performs the previous operation for multiple symbols simultaneously using a ThreadPoolExecutor and also applies the **_split_time_range** function in order to retrieve data for longer than 1000 days.
 
 The universe selection happens at this step. The choice was made based on the top 50 by Market Capitalization from **https://coinmarketcap.com**. The reason being will be explained later in the research process, but a brief explanation is that trend works better on lower volatiltiy coins, and the smaller the Capitalization the higher the volatility due to lack of liquidity in the orderbooks. Also we will use the USDT pairs since these are the most liquid trading pairs.  Another note is that we used less than 50 coins, since some of the top 50 were stablecoins and some others weren't available on Bybit for trading.
 Stablecoins are cryptocurrnecy coins that are pegged to their respective currency. For example USDT is pagged to USD (United States Dollar).
@@ -49,7 +51,7 @@ Lastly we will save our data (which are a Dictionary of DataFrames) in a pickle 
 
 
 
-**2) signals:**
+**2) strategy:**
 
 At this stage we want to create our signals or trading rules that hopefully can capture the momentum effect. What is momentum and why it happens is a good question, that has varying answers. We won't bother trying to explain possible reason for its existence.
 Our assumption is that momentum exists in markets and is especially pronounced in Crypto markets and we will try to create signals that can exploit this effect.
@@ -248,6 +250,40 @@ It is clear that the variance can be summed only for uncorrelated variables.
 
 For the correlated case, we practically have the sum of all the elements ('grand sum') of the covariance matrix.
 
+In this updated version we also have 3 more .py files that contain the new features from the previous TrendFollowing repo. Mainly, we stopped saving our data as a dictionary in Python and instead we are now saving them in a database. From there we can create a localhosted (for now) dashboard where we can create a trading universe, apply an annual volatility target, add our portfolio size and based on our signals to calculate target positions. While we haven't add API integration with Bybity so we can trade from the dashboard, we can "execute" the trades internally: meaning log the time, price, symbol, position size in our database so we can rebalance when new signals emerge or we are outisde the trading buffer we have set. The trading buffer is set based on our target position, where in order to minimize transaction costs, we allow our actual position to wiggle at a fixed percentage from that target. This way we make trades only at the edge of the buffer zone and we don't overtrade based on small fluctations of the signals. While there is a mathematical way to construct this buffer, we use a fixed percentage (10% of the target position) that works well enough for our type of trading (medium frequency) where turnover is daily and we don't need HFT accuracy. 
+
+Below are the new files: 
+
+  **config.py**
+
+  This is where all the strategy parameters live. The signal weights for each rule (EWMAC, bolmom, breakout), the
+  forecast scalars that we calculated during research, the lookback windows, the volatility target and initial capital —
+   everything is centralized here. The idea is that if we want to change something about the strategy (say adjust the
+  vol target or swap a coin in/out of the universe), we only need to touch this one file. It also holds the file paths
+  for the database, logs, and checkpoints, so the rest of the codebase doesn't have hardcoded paths scattered around.
+
+  **portfolio.py**
+
+  This handles everything related to live portfolio management. It connects to a local SQLite database (using WAL mode
+  for concurrent reads) where it stores current positions, trade logs, daily portfolio snapshots, and strategy signals.
+  The main class PortfolioManager tracks capital, computes target positions from the forecast and volatility scalar,
+  applies buffer zones so we don't trade on every small signal change, and executes trades when positions breach the
+  buffer edges. It also does mark-to-market by pulling live prices from Bybit's REST API and correctly handles position
+  flips (e.g. going from long to short), partial closes, and fresh opens — logging realized PnL at each step. There's
+  also a Numba-accelerated backtest function in there for running historical simulations across multiple symbols.
+
+  **dashboard.py**
+
+  This is the Streamlit app that ties everything together into an interactive UI. It has five tabs: Symbol Analysis
+  (candlestick charts with synced crosshair, a forecast gauge, individual signal bars and relative position size),
+  Position Management (target vs current positions, buffer zones, trade execution either per-symbol or in batch),
+  Portfolio Overview (mark-to-market, exposure breakdown by long/short/net/gross, portfolio equity curve), Trade Log
+  (filterable history with CSV export), and System Status (data quality checks, buffer management, database
+  optimization). The sidebar lets you select which symbols to track, fetch new data from Bybit, compute signals, and run
+   mark-to-market — all with a single click. Data is cached with TTL so the dashboard stays responsive without hitting
+  the database on every interaction.
+
+
 ---
 
 ## Live Trading Dashboard
@@ -296,6 +332,7 @@ data_fetcher.py  — Bybit REST API data fetcher with parallel downloads
 
 ## Future Work
 
+- **Trading from dashboard** — Connect to Bybit and execute trades from our dashboard
 - **Auto-refresh** — Scheduled data updates and M2M at configurable intervals
 - **Multi-timeframe strategies** — Leverage the 4h/1h/15m data already stored for intraday signal generation
 - **Cloud deployment** — Move from SQLite to a cloud DB for persistent hosted access
