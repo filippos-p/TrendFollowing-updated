@@ -2,14 +2,14 @@
 
 Momentum research on cryptocurrency markets, signal construction from Robert Carver's systematic trading framework, and a live Streamlit dashboard for portfolio management with volatility-targeted position sizing.
 
-[![Dashboard 1](second.jfif)](second.jfif)
-[![Dashboard 2](thrid.jfif)](thrid.jfif)
-[![Dashboard 3](fourth.jfif)](fourth.jfif)
-[![Dashboard 4](fifth.jfif)](fifth.jfif)
+[![Dashboard 1](second.jpg)](second.jpg)
+[![Dashboard 2](thrid.jpg)](thrid.jpg)
+[![Dashboard 3](fourth.jpg)](fourth.jpg)
+[![Dashboard 4](fifth.jpg)](fifth.jpg)
 
 We also created a new tab, where you can see the combined and individual forecasts as a timeseries for each coin in the trading universe. Along with that there is a relative (to the allocation weight — reminder that we equal weight all the coins from our universe) position size as a bar chart, where you can see the calculated position for each coin. This helps visualize what kind of position (both in size and in direction) we take and how price moves after our position. Or you can flip it and see what kind of positions we take because of the current price. After all we are just trend following and our position just scales based on the product of the (price constructed) signal times our volatility target exposure relative to the recent volatility.
 
-[![Symbol Analysis](first.jfif)](first.jfif)
+[![Symbol Analysis](first.jpg)](first.jpg)
 
 ---
 
