@@ -404,6 +404,94 @@ def fast_update_prices(symbols, category='linear'):
     return result
 
 
+BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
+
+
+def backfill_prices(symbols, days=30, category='linear', progress_cb=None):
+    """Fetch the last *days* of daily klines for each symbol and fill gaps.
+
+    Uses Bybit ``/v5/market/kline`` (interval=D, limit=days).  Each symbol
+    requires one API call so this is N calls total, but it guarantees there
+    are no missing daily candles in the DB.
+
+    Parameters
+    ----------
+    symbols : list[str]
+    days : int  – how many calendar days to backfill (default 30)
+    category : str
+    progress_cb : callable(float) – optional 0→1 progress callback
+
+    Returns
+    -------
+    dict  {symbol: rows_inserted}
+    """
+    from datetime import timedelta
+
+    end_ms = int(datetime.now().timestamp() * 1000)
+    start_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    result = {}
+
+    for idx, sym in enumerate(symbols):
+        try:
+            resp = requests.get(
+                BYBIT_KLINE_URL,
+                params={
+                    'category': category,
+                    'symbol': sym,
+                    'interval': 'D',
+                    'start': start_ms,
+                    'end': end_ms,
+                    'limit': min(days + 1, 1000),
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get('retCode') != 0:
+                log.warning("Kline API error for %s: %s", sym, data.get('retMsg'))
+                result[sym] = 0
+                continue
+
+            klines = data.get('result', {}).get('list', [])
+            if not klines:
+                result[sym] = 0
+                continue
+
+            rows = []
+            for k in klines:
+                try:
+                    ts = datetime.utcfromtimestamp(float(k[0]) / 1000).strftime('%Y-%m-%d 00:00:00')
+                    o, h, lo, c, v = (float(k[1]), float(k[2]),
+                                      float(k[3]), float(k[4]), float(k[5]))
+                except (ValueError, TypeError, IndexError):
+                    continue
+                rows.append((sym, ts, o, h, lo, c, v, '1d', category))
+
+            if rows:
+                with db_connection() as conn:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO price_data "
+                        "(symbol,timestamp,open,high,low,close,volume,interval,category) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        rows,
+                    )
+                    conn.commit()
+            result[sym] = len(rows)
+            log.info("Backfilled %d daily candles for %s", len(rows), sym)
+
+        except Exception as e:
+            log.warning("backfill_prices failed for %s: %s", sym, e)
+            result[sym] = 0
+
+        if progress_cb:
+            progress_cb((idx + 1) / len(symbols))
+
+        # Small delay to avoid rate-limiting
+        time.sleep(0.15)
+
+    return result
+
+
 # ========================================================================
 # Signal computation — fast incremental path
 # ========================================================================

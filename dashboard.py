@@ -472,6 +472,32 @@ with st.sidebar.expander("Advanced", expanded=False):
                     _latest_full_signals.clear()
                     st.rerun()
 
+    _bf_days = st.slider("Backfill days", 7, 90, 30, 1, key="bf_days")
+    if st.button("Backfill & Recompute", key="btn_backfill", use_container_width=True):
+        if selected_symbols:
+            with st.spinner(f"Backfilling {_bf_days} days of price data..."):
+                bar = st.progress(0)
+                filled = pf.backfill_prices(selected_symbols, days=_bf_days,
+                                            category='linear', progress_cb=bar.progress)
+                total_rows = sum(filled.values())
+                st.success(f"Backfilled {total_rows} candles across {len(filled)} symbols")
+            with st.spinner("Recomputing signals..."):
+                bar2 = st.progress(0)
+                sok, serr, smsgs = pf.compute_signals_fast(
+                    selected_symbols, strategy, progress_cb=bar2.progress,
+                )
+                st.success(f"Signals recomputed for {sok} symbols")
+                if serr:
+                    st.warning(f"{serr} errors")
+            _universe.clear()
+            _prices.clear()
+            _ohlc_history.clear()
+            _signal_history.clear()
+            _signals.clear()
+            _latest_full_signals.clear()
+            _do_mtm()
+            st.rerun()
+
 _ar_c1, _ar_c2 = st.sidebar.columns([1, 2])
 with _ar_c1:
     _ar_on = st.toggle("Auto", value=st.session_state.auto_refresh, key="_ar_toggle")
