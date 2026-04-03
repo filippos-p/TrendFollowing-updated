@@ -200,7 +200,7 @@ def ensure_tables():
                 vol_forecast REAL DEFAULT 0,
                 ewmac_2_8 REAL DEFAULT 0, ewmac_4_16 REAL DEFAULT 0,
                 ewmac_8_32 REAL DEFAULT 0, ewmac_16_64 REAL DEFAULT 0,
-                ewmac_32_128 REAL DEFAULT 0,
+                ewmac_32_128 REAL DEFAULT 0, ewmac_64_256 REAL DEFAULT 0,
                 bolmom_8 REAL DEFAULT 0, bolmom_16 REAL DEFAULT 0,
                 bolmom_32 REAL DEFAULT 0, bolmom_64 REAL DEFAULT 0,
                 bolmom_128 REAL DEFAULT 0, bolmom_256 REAL DEFAULT 0,
@@ -340,6 +340,186 @@ def _fallback_prices(symbols):
     """Get last known prices from the DB as fallback."""
     prices = get_latest_prices(list(symbols), lookback_days=1)
     return {r['symbol']: r['close'] for _, r in prices.iterrows()} if not prices.empty else {}
+
+
+def fast_update_prices(symbols, category='linear'):
+    """Fast daily price update using the tickers endpoint (1 API call for all symbols).
+
+    Instead of making N separate kline requests, this pulls OHLCV from
+    Bybit's ``/v5/market/tickers`` which returns data for every perpetual
+    in a single response.  The fields map to today's candle:
+
+        prevPrice24h -> open, highPrice24h -> high,
+        lowPrice24h  -> low,  lastPrice    -> close,
+        volume24h    -> volume
+
+    Returns dict {symbol: price} on success, empty dict on failure.
+    """
+    result = {}
+    try:
+        resp = requests.get(
+            BYBIT_TICKERS_URL,
+            params={'category': category},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get('retCode') != 0:
+            log.warning("Bybit tickers API error: %s", data.get('retMsg'))
+            return {}
+
+        sym_set = set(symbols)
+        now_str = datetime.now().strftime('%Y-%m-%d 00:00:00')
+        rows = []
+        for item in data.get('result', {}).get('list', []):
+            sym = item.get('symbol', '')
+            if sym not in sym_set:
+                continue
+            try:
+                o = float(item.get('prevPrice24h', 0))
+                h = float(item.get('highPrice24h', 0))
+                lo = float(item.get('lowPrice24h', 0))
+                c = float(item.get('lastPrice', 0))
+                v = float(item.get('volume24h', 0))
+            except (ValueError, TypeError):
+                continue
+            if c <= 0:
+                continue
+            result[sym] = c
+            rows.append((sym, now_str, o, h, lo, c, v, '1d', category))
+
+        if rows:
+            with db_connection() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO price_data "
+                    "(symbol,timestamp,open,high,low,close,volume,interval,category) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    rows,
+                )
+                conn.commit()
+            log.info("Fast-updated %d symbols via tickers endpoint", len(rows))
+
+    except Exception as e:
+        log.warning("fast_update_prices failed: %s", e)
+    return result
+
+
+# ========================================================================
+# Signal computation — fast incremental path
+# ========================================================================
+
+# Maximum lookback needed by any signal rule (breakout_320 + some margin)
+_SIGNAL_LOOKBACK = 400
+
+
+def compute_signals_fast(symbols, strategy_module, progress_cb=None):
+    """Compute signals reading only the last N rows per symbol.
+
+    Functionally identical to ``compute_and_save_signals`` but avoids
+    reading full price history (~2000 rows) when only the tail is needed
+    for signal calculation.  Saves only the portion that changed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _compute_one(symbol):
+        try:
+            with db_connection() as conn:
+                # Count total rows to know if we can use the fast path
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM price_data "
+                    "WHERE symbol=? AND interval='1d' AND category='linear'",
+                    (symbol,),
+                ).fetchone()[0]
+                if total < 100:
+                    return symbol, None, None, f"Insufficient data ({total} days)"
+
+                # Read only the tail needed for signal computation
+                read_rows = min(total, _SIGNAL_LOOKBACK)
+                df = pd.read_sql_query(
+                    "SELECT timestamp, open, high, low, close, volume "
+                    "FROM price_data WHERE symbol=? AND interval='1d' AND category='linear' "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    conn, params=(symbol, read_rows),
+                )
+            # Reverse so oldest-first
+            df = df.iloc[::-1].reset_index(drop=True)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df_out = strategy_module.add_signals(df)
+            # Only save the last 5 rows (today + a few days buffer)
+            tail = df_out.tail(5)
+            return symbol, df_out, tail, "OK"
+        except Exception as e:
+            return symbol, None, None, str(e)
+
+    workers = min(4, len(symbols))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(_compute_one, symbols))
+
+    ok, err, msgs = 0, 0, []
+    for i, (sym, df_full, df_tail, msg) in enumerate(results):
+        if progress_cb:
+            progress_cb((i + 1) / len(results))
+        if df_tail is not None:
+            _save_signals_tail(sym, df_tail)
+            ok += 1
+            msgs.append(f"OK  {sym}")
+        else:
+            err += 1
+            msgs.append(f"ERR {sym}: {msg}")
+    return ok, err, msgs
+
+
+def _save_signals_tail(symbol, df):
+    """Upsert only the last few signal rows (fast incremental save)."""
+    now_str = datetime.now().isoformat()
+    valid = df.dropna(subset=['timestamp', 'close']).copy()
+    if valid.empty:
+        return
+
+    signal_cols = [
+        'volume', 'combined_signal', 'ewmac_combined', 'bolmom_combined',
+        'breakout_combined', 'vol_forecast',
+        'ewmac_2_8', 'ewmac_4_16', 'ewmac_8_32', 'ewmac_16_64', 'ewmac_32_128', 'ewmac_64_256',
+        'bolmom_8', 'bolmom_16', 'bolmom_32', 'bolmom_64', 'bolmom_128', 'bolmom_256',
+        'breakout_10', 'breakout_20', 'breakout_40', 'breakout_80',
+        'breakout_160', 'breakout_320',
+    ]
+    for col in signal_cols:
+        if col not in valid.columns:
+            valid[col] = 0.0
+    valid[signal_cols] = valid[signal_cols].fillna(0.0)
+
+    timestamps = valid['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S').values
+    closes = valid['close'].values
+    arrays = [valid[c].values for c in signal_cols]
+
+    rows = [
+        (symbol, '1d', 'linear', timestamps[i], float(closes[i]),
+         *[float(a[i]) for a in arrays], now_str)
+        for i in range(len(valid))
+    ]
+
+    with db_connection() as conn:
+        # Delete only the dates we're replacing, not the entire history
+        ts_list = list(timestamps)
+        ph = ','.join('?' * len(ts_list))
+        conn.execute(
+            f"DELETE FROM strategy_signals "
+            f"WHERE symbol=? AND interval='1d' AND category='linear' "
+            f"AND timestamp IN ({ph})",
+            [symbol] + ts_list,
+        )
+        conn.executemany(
+            "INSERT INTO strategy_signals "
+            "(symbol,interval,category,timestamp,close,volume,combined_signal,"
+            "ewmac_combined,bolmom_combined,breakout_combined,vol_forecast,"
+            "ewmac_2_8,ewmac_4_16,ewmac_8_32,ewmac_16_64,ewmac_32_128,ewmac_64_256,"
+            "bolmom_8,bolmom_16,bolmom_32,bolmom_64,bolmom_128,bolmom_256,"
+            "breakout_10,breakout_20,breakout_40,breakout_80,breakout_160,breakout_320,"
+            "created_at) VALUES (" + ",".join(["?"] * 30) + ")",
+            rows,
+        )
+        conn.commit()
 
 
 # ========================================================================
@@ -505,7 +685,7 @@ def _save_signals_batch(symbol, df):
     signal_cols = [
         'volume', 'combined_signal', 'ewmac_combined', 'bolmom_combined',
         'breakout_combined', 'vol_forecast',
-        'ewmac_2_8', 'ewmac_4_16', 'ewmac_8_32', 'ewmac_16_64', 'ewmac_32_128',
+        'ewmac_2_8', 'ewmac_4_16', 'ewmac_8_32', 'ewmac_16_64', 'ewmac_32_128', 'ewmac_64_256',
         'bolmom_8', 'bolmom_16', 'bolmom_32', 'bolmom_64', 'bolmom_128', 'bolmom_256',
         'breakout_10', 'breakout_20', 'breakout_40', 'breakout_80',
         'breakout_160', 'breakout_320',
@@ -536,10 +716,10 @@ def _save_signals_batch(symbol, df):
             "INSERT INTO strategy_signals "
             "(symbol,interval,category,timestamp,close,volume,combined_signal,"
             "ewmac_combined,bolmom_combined,breakout_combined,vol_forecast,"
-            "ewmac_2_8,ewmac_4_16,ewmac_8_32,ewmac_16_64,ewmac_32_128,"
+            "ewmac_2_8,ewmac_4_16,ewmac_8_32,ewmac_16_64,ewmac_32_128,ewmac_64_256,"
             "bolmom_8,bolmom_16,bolmom_32,bolmom_64,bolmom_128,bolmom_256,"
             "breakout_10,breakout_20,breakout_40,breakout_80,breakout_160,breakout_320,"
-            "created_at) VALUES (" + ",".join(["?"] * 29) + ")",
+            "created_at) VALUES (" + ",".join(["?"] * 30) + ")",
             rows,
         )
         conn.execute('COMMIT')
