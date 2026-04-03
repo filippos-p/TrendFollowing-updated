@@ -185,6 +185,12 @@ def ensure_tables():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS dashboard_settings (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS strategy_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -240,6 +246,32 @@ def optimize_indexes():
             except Exception:
                 pass
         conn.commit()
+
+
+# ========================================================================
+# Dashboard settings persistence
+# ========================================================================
+
+def save_setting(key, value):
+    """Persist a dashboard setting to the DB."""
+    with db_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES (?, ?)",
+            (key, float(value)),
+        )
+        conn.commit()
+
+
+def load_setting(key, default=None):
+    """Load a dashboard setting from the DB, or return default."""
+    try:
+        with db_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM dashboard_settings WHERE key=?", (key,)
+            ).fetchone()
+        return row[0] if row else default
+    except Exception:
+        return default
 
 
 # ========================================================================

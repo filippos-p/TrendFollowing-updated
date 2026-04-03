@@ -533,15 +533,27 @@ st.sidebar.divider()
 st.sidebar.markdown(f'<p style="font-size:0.72rem;color:{T["muted"]};text-transform:uppercase;'
                     f'letter-spacing:0.08em;margin:0 0 6px 0;font-weight:600;">Portfolio</p>',
                     unsafe_allow_html=True)
+_saved_cap = pf.load_setting('initial_capital', cfg.DASHBOARD_INITIAL_CAPITAL)
+_saved_tv = pf.load_setting('target_volatility', cfg.DASHBOARD_TARGET_VOLATILITY)
+_saved_buf = pf.load_setting('buffer_pct', cfg.DASHBOARD_DEFAULT_BUFFER)
+
 cap_input = st.sidebar.number_input("Initial Capital ($)", 10, 10_000_000,
-                                    value=cfg.DASHBOARD_INITIAL_CAPITAL, step=100, key="cap_input")
+                                    value=int(_saved_cap), step=100, key="cap_input")
 tv = st.sidebar.slider("Target Volatility", 0.10, 1.00,
-                        value=cfg.DASHBOARD_TARGET_VOLATILITY, step=0.05, key="tv")
+                        value=float(_saved_tv), step=0.05, key="tv")
 buf = st.sidebar.slider("Default Buffer Zone", 0.05, 0.50,
-                         value=cfg.DASHBOARD_DEFAULT_BUFFER, step=0.01, key="buf")
+                         value=float(_saved_buf), step=0.01, key="buf")
 pm.initial_capital = cap_input
 pm.target_volatility = tv
 pm.default_buffer_pct = buf
+
+# Persist to DB whenever values change
+if cap_input != _saved_cap:
+    pf.save_setting('initial_capital', cap_input)
+if tv != _saved_tv:
+    pf.save_setting('target_volatility', tv)
+if buf != _saved_buf:
+    pf.save_setting('buffer_pct', buf)
 
 # --- Admin ---
 with st.sidebar.expander("Admin", expanded=False):
