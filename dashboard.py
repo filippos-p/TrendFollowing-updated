@@ -51,12 +51,6 @@ if 'auto_refresh_interval' not in st.session_state:
     st.session_state.auto_refresh_interval = 60
 if 'last_auto_refresh' not in st.session_state:
     st.session_state.last_auto_refresh = 0.0
-if 'cap_input' not in st.session_state:
-    st.session_state.cap_input = cfg.DASHBOARD_INITIAL_CAPITAL
-if 'tv' not in st.session_state:
-    st.session_state.tv = cfg.DASHBOARD_TARGET_VOLATILITY
-if 'buf' not in st.session_state:
-    st.session_state.buf = cfg.DASHBOARD_DEFAULT_BUFFER
 
 pm: pf.PortfolioManager = st.session_state.pm
 
@@ -540,11 +534,11 @@ st.sidebar.markdown(f'<p style="font-size:0.72rem;color:{T["muted"]};text-transf
                     f'letter-spacing:0.08em;margin:0 0 6px 0;font-weight:600;">Portfolio</p>',
                     unsafe_allow_html=True)
 cap_input = st.sidebar.number_input("Initial Capital ($)", 10, 10_000_000,
-                                    value=st.session_state.cap_input, step=100, key="cap_input")
+                                    value=cfg.DASHBOARD_INITIAL_CAPITAL, step=100, key="cap_input")
 tv = st.sidebar.slider("Target Volatility", 0.10, 1.00,
-                        value=st.session_state.tv, step=0.05, key="tv")
+                        value=cfg.DASHBOARD_TARGET_VOLATILITY, step=0.05, key="tv")
 buf = st.sidebar.slider("Default Buffer Zone", 0.05, 0.50,
-                         value=st.session_state.buf, step=0.01, key="buf")
+                         value=cfg.DASHBOARD_DEFAULT_BUFFER, step=0.01, key="buf")
 pm.initial_capital = cap_input
 pm.target_volatility = tv
 pm.default_buffer_pct = buf
