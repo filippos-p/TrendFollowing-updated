@@ -51,6 +51,12 @@ if 'auto_refresh_interval' not in st.session_state:
     st.session_state.auto_refresh_interval = 60
 if 'last_auto_refresh' not in st.session_state:
     st.session_state.last_auto_refresh = 0.0
+if 'cap_input' not in st.session_state:
+    st.session_state.cap_input = cfg.DASHBOARD_INITIAL_CAPITAL
+if 'tv' not in st.session_state:
+    st.session_state.tv = cfg.DASHBOARD_TARGET_VOLATILITY
+if 'buf' not in st.session_state:
+    st.session_state.buf = cfg.DASHBOARD_DEFAULT_BUFFER
 
 pm: pf.PortfolioManager = st.session_state.pm
 
@@ -533,9 +539,12 @@ st.sidebar.divider()
 st.sidebar.markdown(f'<p style="font-size:0.72rem;color:{T["muted"]};text-transform:uppercase;'
                     f'letter-spacing:0.08em;margin:0 0 6px 0;font-weight:600;">Portfolio</p>',
                     unsafe_allow_html=True)
-cap_input = st.sidebar.number_input("Initial Capital ($)", 10, 10_000_000, cfg.DASHBOARD_INITIAL_CAPITAL, 100)
-tv = st.sidebar.slider("Target Volatility", 0.10, 1.00, cfg.DASHBOARD_TARGET_VOLATILITY, 0.05)
-buf = st.sidebar.slider("Default Buffer Zone", 0.05, 0.50, cfg.DASHBOARD_DEFAULT_BUFFER, 0.01)
+cap_input = st.sidebar.number_input("Initial Capital ($)", 10, 10_000_000,
+                                    value=st.session_state.cap_input, step=100, key="cap_input")
+tv = st.sidebar.slider("Target Volatility", 0.10, 1.00,
+                        value=st.session_state.tv, step=0.05, key="tv")
+buf = st.sidebar.slider("Default Buffer Zone", 0.05, 0.50,
+                         value=st.session_state.buf, step=0.01, key="buf")
 pm.initial_capital = cap_input
 pm.target_volatility = tv
 pm.default_buffer_pct = buf
@@ -563,14 +572,17 @@ if selected_symbols:
     _portfolio_val = _sum_cap[0]
     _open_count = len(_sum_pos) if not _sum_pos.empty else 0
 
-    # Daily P&L from portfolio log
+    # Daily P&L: unrealized (mark-to-market) + today's realized trades
     _daily_pnl = 0.0
     try:
         with pf.db_connection() as _sc:
-            _last2 = pd.read_sql_query(
-                "SELECT total_capital FROM daily_portfolio_log ORDER BY date DESC LIMIT 2", _sc)
-        if len(_last2) >= 2:
-            _daily_pnl = _last2.iloc[0]['total_capital'] - _last2.iloc[1]['total_capital']
+            _row = _sc.execute(
+                "SELECT COALESCE(unrealized_pnl, 0) AS unrealized, "
+                "COALESCE(realized_pnl, 0) AS realized "
+                "FROM daily_portfolio_log ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+        if _row:
+            _daily_pnl = _row[0] + _row[1]
     except Exception:
         pass
 
